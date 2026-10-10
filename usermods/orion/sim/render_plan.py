@@ -20,6 +20,7 @@ SECTIONS = ["silence", "calm", "groove", "build", "drop", "breakdown"]
 W, H = 960, 720
 X0, X1, Y0, Y1 = 0.6, 8.6, 3.7, 9.9   # plan metres shown
 GLOW_M = 0.22                          # glow sigma in metres
+GLOW_DOWN = 4                          # glow is blurred at 1/GLOW_DOWN resolution
 
 
 def load(prefix):
@@ -69,8 +70,13 @@ def draw(rgb, px, py):
     sigma = GLOW_M / (X1 - X0) * W
     # A fully lit strip (16 LEDs per metre) peaks at 0.9 at its centre line.
     spacing = W / (X1 - X0) / 16
-    glow = np.stack([gaussian_filter(img[..., c], sigma) for c in range(3)], -1) * 0.9 * spacing * np.sqrt(2 * np.pi) * sigma
-    core = np.stack([gaussian_filter(img[..., c], 1.2) for c in range(3)], -1) * 3
+    # The glow is smooth, so it is blurred at a quarter of the resolution and scaled back up.
+    small = np.zeros((H // GLOW_DOWN, W // GLOW_DOWN, 3), np.float32)
+    np.add.at(small, (py // GLOW_DOWN, px // GLOW_DOWN), col)
+    glow = np.stack([np.asarray(Image.fromarray(gaussian_filter(small[..., c], sigma / GLOW_DOWN))
+                                .resize((W, H), Image.BILINEAR)) for c in range(3)], -1)
+    glow *= 0.9 * spacing * np.sqrt(2 * np.pi) * sigma / GLOW_DOWN ** 2
+    core = np.stack([gaussian_filter(img[..., c], 1.2, truncate=3) for c in range(3)], -1) * 3
     out = np.clip(glow + core, 0, 1) ** (1 / 1.6)  # display gamma so dim light stays visible
     return (out * 255).astype(np.uint8)
 
