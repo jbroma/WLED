@@ -1,7 +1,8 @@
 #!/bin/sh
 # Renders every look pinned on every synthetic track (truth Scores, locked and with the tempo lock
-# zeroed) plus the autopilot, and counts flashes. Exits non-zero when any render flashes the whole
-# room more than 3 times in a second.
+# zeroed) plus the autopilot, then runs two gates. Exits non-zero when any render flashes the whole
+# room more than 3 times in a second, or when any render's p99 step between neighbouring COB blocks
+# exceeds 0.20.
 #   sh check_looks.sh [OUTDIR]
 set -e
 cd "$(dirname "$0")"
@@ -26,4 +27,7 @@ for track in $TRACKS; do
   "$SIM" --scores "$OUT/$track.scores" --rooms "$ROOMS" --out "$OUT/$track-autopilot" --fps 60 --autopilot 1 2>/dev/null
   prefixes="$prefixes $OUT/$track-autopilot"
 done
-uv run --quiet --with numpy python flash_check.py $prefixes
+status=0
+uv run --quiet --with numpy python flash_check.py $prefixes || status=1
+uv run --quiet --with numpy python smooth_check.py --rooms "$ROOMS" --limit 0.2 $prefixes || status=1
+exit $status

@@ -16,6 +16,14 @@ namespace {
 constexpr float kBeatsPerPhrase = kBeatsPerBar * kBarsPerPhrase;
 // Whole-room flashes start at least this far apart: at most 3 per second (WCAG 2.3.1).
 constexpr float kFlashGap = 0.34f;
+// The strips are COB: an addressable LED lights a 6-7 cm block of strip, edge to edge, and two
+// neighbouring blocks in clearly different colours read as a seam. So light never goes from dark to
+// full over less than this many metres of strip, five or six blocks: a step of at most 0.2 between
+// neighbours. Every front, head and spot below is at least this soft.
+constexpr float kRamp = 0.38f;
+// The room box that Led.u, v and rn are normalised to, in metres: u spans kRoomW, v spans kRoomH,
+// and rn is metres from the stage over kRoomFar. Widths in metres convert through these.
+constexpr float kRoomW = 6.95f, kRoomH = 5.12f, kRoomFar = 7.44f;
 constexpr Rgbf kBlack = {0, 0, 0};
 constexpr Rgbf kWhite = {1, 1, 1};
 
@@ -30,6 +38,9 @@ float bump(float x) {
   x *= x;
   return x < 1 ? (1 - x) * (1 - x) : 0;
 }
+// 1 at d = 0, falling linearly to 0 at kRamp metres either side: the hardest edge the strips may
+// show. A multiply, not a divide: the ESP32 divides floats in software.
+float ramp(float d) { return clamp01(1 - fabsf(d) * (1 / kRamp)); }
 // Fast start, slow arrival: motion that leaves with the beat and settles.
 float easeOut(float t) {
   t = 1 - clamp01(t);
@@ -50,6 +61,12 @@ float wave(float x) {
 }
 // Signed distance between two angles in turns, -0.5..0.5.
 float turns(float d) { return d - floorf(d + 0.5f); }
+// Metres of circle per turn of Led.a at this LED. The strips pass from 0.8 to 4.3 m from the room
+// centre, so a width in turns would be five times narrower on the nearest strip than on a far wall.
+float perTurn(const Led& led) {
+  const float x = (led.u - 0.5f) * kRoomW, y = (led.v - 0.5f) * kRoomH;
+  return 6.2832f * sqrtf(x * x + y * y);
+}
 float unitHash(uint32_t a, uint32_t b) {
   uint32_t h = a * 0x9E3779B1u ^ b * 0x85EBCA77u;
   h ^= h >> 15;
@@ -111,20 +128,20 @@ bool mayFlash(const Moment& m, const Hit& h) {
 
 // ---- shared fields ----
 
-// A ring that left the stage `age` seconds ago and crosses the room in `travel` seconds: a crisp
-// front in `front`, trailing a tail twice as wide toward the stage in `tail`.
-Rgbf ring(float rn, float age, float travel, float width, Rgbf front, Rgbf tail) {
+// A ring that left the stage `age` seconds ago and crosses the room in `travel` seconds: a front in
+// `front`, trailing `tail` metres toward the stage and turning into `tailColour` along the way.
+Rgbf ring(float rn, float age, float travel, float tail, Rgbf front, Rgbf tailColour) {
   const float t = age / travel;
   if (t >= 1) return kBlack;
-  const float d = rn - 1.15f * easeOut(t);
-  if (d > 0.5f * width || d < -2 * width) return kBlack;
-  const float k = d > 0 ? bump(d / (0.5f * width)) : bump(d / (2 * width));
-  return mix(tail, front, smooth(-2 * width, 0, d)) * (k * (1 - t * t));
+  const float d = (rn - 1.15f * easeOut(t)) * kRoomFar;  // metres ahead of the front
+  if (d > kRamp || d < -tail) return kBlack;
+  const float k = d > 0 ? ramp(d) : bump(d / tail);
+  return mix(tailColour, front, smooth(-tail, 0, d)) * (k * (1 - t * t));
 }
 
 // Rings from every kick; without kicks the grid still shows: a soft ring on each bar, on each beat
 // in a build.
-Rgbf kickRings(const Moment& m, const Led& led, float travel, float width, Rgbf front, Rgbf tail) {
+Rgbf kickRings(const Moment& m, const Led& led, float travel, float tail, Rgbf front, Rgbf tailColour) {
   Rgbf c = kBlack;
   bool kicked = false;
   for (int i = 0; i < m.hitCount; i++) {
@@ -132,13 +149,14 @@ Rgbf kickRings(const Moment& m, const Led& led, float travel, float width, Rgbf 
     if (h.voice != Voice::Kick) continue;
     kicked = true;
     const bool down = onDownbeat(m, h);
-    c = c + ring(led.rn, h.age, travel, down ? 1.5f * width : width, front, tail) * (h.strength * (down ? 1.1f : 0.85f));
+    c = c + ring(led.rn, h.age, travel, down ? 1.5f * tail : tail, front, tailColour) *
+                (h.strength * (down ? 1.1f : 0.85f));
   }
   if (!kicked && m.lock > 0) {
     const bool build = m.section == Section::Build;
     const float every = build ? slotBeats(m, 1) : kBeatsPerBar;
     const float amp = build ? 0.35f + 0.55f * m.tension : 0.4f;
-    c = ring(led.rn, fmodf(m.inBar, every) * spbOf(m), travel, width, front, tail) * (amp * m.lock);
+    c = ring(led.rn, fmodf(m.inBar, every) * spbOf(m), travel, tail, front, tailColour) * (amp * m.lock);
   }
   return c;
 }
@@ -161,10 +179,10 @@ Rgbf stageKick(const Moment& m, const Palette& pal) {
   return mix(pal.a, pal.accent, 0.3f * k) * (0.18f + 0.07f * m.level + 0.5f * k);
 }
 
-// A beam around the room centre at `pos` turns, with a tail three times as long behind it.
-float beam(float a, float pos, float dir, float width) {
-  const float d = turns(a - pos) * dir;
-  return d > 0 ? bump(d / width) : bump(d / (3 * width));
+// A beam around the room centre at `pos` turns heading `dir`: a soft head, a 2 m tail behind it.
+float beam(const Led& led, float metresPerTurn, float pos, float dir) {
+  const float d = turns(led.a - pos) * dir * metresPerTurn;  // metres ahead of the beam
+  return d > 0 ? ramp(d) : bump(d * 0.5f);
 }
 
 // ---- looks ----
@@ -208,9 +226,9 @@ Rgbf orbit(const Moment& m, const Led& led, const Params& p, const Palette& pal)
   }
   pos *= dir;
   const float free = m.lock < 1 ? drift(m, p) * 0.1f : 0;
-  const float width = led.role == Role::Edge ? 0.025f : 0.035f;
-  const float one = m.lock * beam(led.a, pos, dir, width) + (1 - m.lock) * beam(led.a, free, 1, width);
-  const float two = m.lock * beam(led.a, pos + 0.5f, dir, width) + (1 - m.lock) * beam(led.a, free + 0.5f, 1, width);
+  const float around = perTurn(led);
+  const float one = m.lock * beam(led, around, pos, dir) + (1 - m.lock) * beam(led, around, free, 1);
+  const float two = m.lock * beam(led, around, pos + 0.5f, dir) + (1 - m.lock) * beam(led, around, free + 0.5f, 1);
   const float level = (0.55f + 0.45f * m.level) * (0.75f + 0.25f * m.lock * decay(fract(m.inBar) * 2));
   const bool echo = led.role == Role::Edge;
   const float tint = echo ? 0.5f : 0;
@@ -222,7 +240,7 @@ Rgbf orbit(const Moment& m, const Led& led, const Params& p, const Palette& pal)
 Rgbf shockwave(const Moment& m, const Led& led, const Params& p, const Palette& pal) {
   if (led.role == Role::Stage) return stageKick(m, pal);
   const float travel = fminf(1.15f, fmaxf(0.6f, 1.8f * spbOf(m)));
-  return pal.b * (0.04f + 0.08f * m.low) + kickRings(m, led, travel, 0.07f, pal.a, pal.b) + pal.a * swell(m, led);
+  return pal.b * (0.04f + 0.08f * m.low) + kickRings(m, led, travel, 1.1f, pal.a, pal.b) + pal.a * swell(m, led);
 }
 
 // A soft bar crosses the room along x on the backbeat (the offbeat of every beat in a drop, once a
@@ -242,9 +260,9 @@ Rgbf sweep(const Moment& m, const Led& led, const Params& p, const Palette& pal)
   const float fromBar = m.inBar - offset;
   const float since = fromBar - every * floorf(fromBar / every);    // beats since this sweep began
   const bool east = ((m.bar - (fromBar - since < 0 ? 1 : 0)) & 1) == 0;
-  auto bar = [&](float pos, bool toEast) {  // pos 0..1 along the way; d > 0 ahead of the bar
-    const float d = toEast ? led.u + 0.15f - 1.3f * pos : 1.15f - 1.3f * pos - led.u;
-    return d > 0 ? bump(d / 0.06f) : bump(d / 0.25f);
+  auto bar = [&](float pos, bool toEast) {  // pos 0..1 along the way; d > 0 metres ahead; a 2 m tail
+    const float d = (toEast ? led.u + 0.15f - 1.3f * pos : 1.15f - 1.3f * pos - led.u) * kRoomW;
+    return d > 0 ? ramp(d) : bump(d * 0.5f);
   };
   const float t = since / fminf(every, 1.25f);
   float v = m.lock * bar(easeOut(t), east) * (1 - 0.6f * t * t) * (t < 1);
@@ -257,30 +275,32 @@ Rgbf sweep(const Moment& m, const Led& led, const Params& p, const Palette& pal)
 }
 
 // The drum kit split across the fixtures: kicks are wide soft rings from the stage on the coves,
-// snares are streaks running along the coves, hats are small sparkles on the edge runs only.
+// snares are streaks running along the coves, hats are soft patches popping on the edge runs only.
 Rgbf layers(const Moment& m, const Led& led, const Params& p, const Palette& pal) {
   if (led.role == Role::Stage) return stageKick(m, pal);
   const bool cove = led.role == Role::Cove || led.role == Role::Band;
   Rgbf c = pal.a * (0.03f + 0.05f * m.level);
   if (cove) {
     const float travel = fminf(1.15f, fmaxf(0.6f, 1.6f * spbOf(m)));
-    c = c + kickRings(m, led, travel, 0.15f, pal.a, pal.a) * 0.5f + pal.a * swell(m, led);
+    c = c + kickRings(m, led, travel, 2.2f, pal.a, pal.a) * 0.5f + pal.a * swell(m, led);
   }
   // Snares and hats draw over the kick layer instead of adding to it, so colours never mix to white.
+  const float around = perTurn(led);
   int snares = 0, hats = 0;
   for (int i = 0; i < m.hitCount; i++) {
     const Hit& h = m.hits[i];
     if (h.voice == Voice::Snare && cove && snares++ < 2) {
       const float t = h.age / 0.6f;
       if (t >= 1) continue;
-      const float d = fabsf(turns(led.a - unitHash(h.seed, 1)));
-      const float head = 0.06f + 0.2f * easeOut(t * 2);
-      const float v = d < head ? smooth(0, head, d) : bump((d - head) / 0.02f);
+      const float at = unitHash(h.seed, 1), run = 0.06f + 0.2f * easeOut(t * 2);  // turns each way
+      const float v = fmaxf(beam(led, around, at + run, 1), beam(led, around, at - run, -1));
       c = brighter(c, pal.b * (v * decay(t) * fminf(1, 1.5f * h.strength)));
     } else if (h.voice == Voice::Hat && led.role == Role::Edge && hats++ < 3) {
-      // Each hat lights fresh cells and lingers into the next, so the edge as a whole stays level
+      // Each hat lights fresh patches and lingers into the next, so the edge as a whole stays level
       // instead of flashing at the hat rate.
-      if (unitHash(h.seed, (uint32_t)(led.a * 48)) < 0.1f) c = brighter(c, pal.accent * decay(h.age / 0.32f));
+      float v = 0;
+      for (uint32_t k = 2; k < 8; k++) v = fmaxf(v, ramp(turns(led.a - unitHash(h.seed, k)) * around));
+      c = brighter(c, pal.accent * (v * decay(h.age / 0.32f)));
     }
   }
   return c;
@@ -299,7 +319,7 @@ Rgbf riser(const Moment& m, const Led& led, const Params& p, const Palette& pal)
   // The converging ring is a second event per interval: only when two still fit the flash budget.
   const float target = edge * (1 - easeOut(since / interval));
   const float converge = interval >= 2 * kFlashGap && led.role != Role::Stage && target > 0.12f
-                             ? m.lock * bump((led.rn - target) / 0.07f) : 0;
+                             ? m.lock * ramp((led.rn - target) * kRoomFar) : 0;
   const float level = inside * (0.2f + 0.45f * tension + (0.2f + 0.35f * tension) * pulse + 0.6f * converge);
   const Rgbf col = mix(mix(pal.b, pal.a, smooth(0, edge, led.rn)), kWhite, 0.8f * tension * tension);
   return col * (level * (0.8f + 0.2f * m.level));
@@ -324,10 +344,10 @@ Rgbf impact(const Moment& m, const Led& led, const Params& p, const Palette& pal
       const float fill = 1 - smooth(front - 0.4f, front, led.rn);
       c = c + mix(col, pal.accent, bump(led.rn / 0.35f) * 0.7f) * (fill * decay(h.age / 0.5f) * h.strength);
     } else {
-      c = c + ring(led.rn, h.age, 0.7f, 0.12f, col, pal.accent) * h.strength;
+      c = c + ring(led.rn, h.age, 0.7f, 1.8f, col, pal.accent) * h.strength;
     }
   }
-  if (!kicked && led.role != Role::Stage) c = c + kickRings(m, led, 0.8f, 0.12f, pal.a, pal.b);
+  if (!kicked && led.role != Role::Stage) c = c + kickRings(m, led, 0.8f, 1.8f, pal.a, pal.b);
   const bool drop = m.section == Section::Drop || m.section == Section::Groove;
   if (drop && m.lock >= 0.5f && intoPhrase < 1) c = brighter(c, kWhite * decay(intoPhrase * spb / 0.3f));
   return c;
