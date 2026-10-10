@@ -22,6 +22,13 @@ class Conductor {
     float onset;                                       // onset detection function, this frame
     float bpm;                                         // current tempo estimate
     float tempoStrength;                               // how clearly the tempo stands out, 0..1
+    float voice[kVoices];                              // per-voice onset strength this frame, 0..1
+    float phaseErrMs;                                  // last beat: observed onset minus predicted beat
+    int hit;                                           // last beat found an onset near the prediction
+    int downbeatPhase;                                 // beat number mod 4 that starts a bar
+    float lowRel, allRel;                              // bass and overall level against the long-term, log2
+    float kickActivity;                                // kick presence against its groove level, 0..1+
+    float rise;                                        // mid/high level slope, log2 per bar
   };
   Debug debug() const;
 
