@@ -167,6 +167,33 @@ static void mode_orion_aurora(void) {
 }
 static const char _data_FX_MODE_ORION_AURORA[] PROGMEM = "Orion Aurora@!,Waves,Level,Width,Floor,Dither;,Floor colour;!;;sx=150,ix=46,c1=40,c2=96,c3=5,o1=0,pal=50";
 
+// The patched AudioReactive keeps its last few raw frames in a ring (um_data slots 8-11): bands,
+// a cycle count and the millis() each cycle finished. Reading from the ring, a loop that stalled
+// still gets every frame, stamped with when the FFT made it rather than when the loop got to it.
+// Calls fn(frame) for every frame after `last`, oldest first; returns false without the patch.
+template <class Fn>
+static bool eachNewFrame(uint32_t& last, Fn fn) {
+  um_data_t* um = nullptr;
+  if (!UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE) || !um || um->u_size < 12) return false;
+  const float* ring = (const float*)um->u_data[8];
+  const uint32_t count = *(const volatile uint32_t*)um->u_data[9];
+  const uint32_t* ms = (const uint32_t*)um->u_data[10];
+  const uint32_t depth = *(const uint32_t*)um->u_data[11];
+  // The FFT task may be writing slot `count`; keep one slot of margin behind it.
+  uint32_t id = count - last > depth - 2 ? count - (depth - 2) : last;
+  for (; id < count; id++) {
+    orion::Frame f;
+    const uint32_t slot = id % depth;
+    memcpy(f.raw, ring + slot * orion::kBands, sizeof f.raw);
+    f.id = id + 1;
+    f.at = ms[slot];
+    f.volume = *(const float*)um->u_data[0];
+    fn(f);
+  }
+  last = count;
+  return true;
+}
+
 /*
  * Trace: the AudioReactive frames this controller saw, for offline analysis.
  * GET /orion/trace?since=N returns up to 80 frames newer than sequence N still
@@ -181,7 +208,11 @@ static const char _data_FX_MODE_ORION_AURORA[] PROGMEM = "Orion Aurora@!,Waves,L
  * Where the FFT runs (the sender) a frame is a new fftFrame count; receivers
  * have no FFT, so there a frame is a change of the GEQ bands.
  */
-struct TraceFrame { uint32_t ms, fftFrame; float vol; uint8_t bands[16]; uint16_t raw[16]; };
+struct TraceFrame { uint32_t ms, fftFrame; float vol; uint8_t bands[16]; uint16_t raw[16]; uint8_t section; float kickAct, lowRel, allRel; };
+// What the conductor concluded on each recent frame, so a trace can be compared with the simulator
+// frame by frame (/orion/trace appends: section kickAct lowRel allRel).
+struct StepNote { uint32_t frame; uint8_t section; float kickAct, lowRel, allRel; };
+static StepNote stepNotes[128];
 static constexpr unsigned TRACE_LEN = 512;
 static TraceFrame* traceRing = nullptr;
 static uint32_t traceSeq = 0;
@@ -191,25 +222,27 @@ static void traceAudio() {
   um_data_t* um = nullptr;
   if (!UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE) || !um) return;
   const uint8_t* bands = (const uint8_t*)um->u_data[2];
-  const bool hasRaw = um->u_size >= 10;
-  const uint32_t fftFrame = hasRaw ? *(const uint32_t*)um->u_data[9] : 0;
+  auto record = [&](uint32_t ms, uint32_t frame, const float* raw) {
+    TraceFrame& f = traceRing[traceSeq % TRACE_LEN];
+    f.ms = ms;
+    f.fftFrame = frame;
+    f.vol = *(const float*)um->u_data[0];
+    memcpy(f.bands, bands, 16);
+    for (int b = 0; b < 16; b++) f.raw[b] = raw ? (uint16_t)min(65535.0f, log2f(1.0f + raw[b]) * 2048.0f + 0.5f) : 0;
+    const StepNote& n = stepNotes[frame % 128];
+    const bool noted = frame && n.frame == frame;
+    f.section = noted ? n.section : 255;
+    f.kickAct = noted ? n.kickAct : 0;
+    f.lowRel = noted ? n.lowRel : 0;
+    f.allRel = noted ? n.allRel : 0;
+    traceSeq++;
+  };
   static uint32_t lastFrame = 0;
+  if (eachNewFrame(lastFrame, [&](const orion::Frame& f) { record(f.at, f.id, f.raw); }) && lastFrame) return;
   static uint8_t lastBands[16];
-  if (fftFrame) {
-    if (fftFrame == lastFrame) return;
-    lastFrame = fftFrame;
-  } else {
-    if (memcmp(bands, lastBands, 16) == 0) return;
-    memcpy(lastBands, bands, 16);
-  }
-  TraceFrame& f = traceRing[traceSeq % TRACE_LEN];
-  f.ms = millis();
-  f.fftFrame = fftFrame;
-  f.vol = *(const float*)um->u_data[0];
-  memcpy(f.bands, bands, 16);
-  for (int b = 0; b < 16; b++)
-    f.raw[b] = hasRaw ? (uint16_t)min(65535.0f, log2f(1.0f + ((const float*)um->u_data[8])[b]) * 2048.0f + 0.5f) : 0;
-  traceSeq++;
+  if (memcmp(bands, lastBands, 16) == 0) return;
+  memcpy(lastBands, bands, 16);
+  record(millis(), 0, nullptr);
 }
 
 static void serveTrace(AsyncWebServerRequest* request) {
@@ -230,7 +263,7 @@ static void serveTrace(AsyncWebServerRequest* request) {
     out->printf("%u %u %u %.2f", seq + 1, f.ms, f.fftFrame, f.vol);
     for (int b = 0; b < 16; b++) out->printf(" %u", f.bands[b]);
     for (int b = 0; b < 16; b++) out->printf(" %.1f", exp2f(f.raw[b] / 2048.0f) - 1.0f);
-    out->print('\n');
+    out->printf(" %u %.3f %.3f %.3f\n", f.section, f.kickAct, f.lowRel, f.allRel);
   }
   request->send(out);
 }
@@ -343,35 +376,20 @@ class OrionUsermod : public Usermod {
     udpOpen = udp.beginMulticast(IPAddress(239, 0, 0, 1), orion::kPort);
   }
 
-  // The newest AudioReactive FFT frame, or false when there is none since the last call. The FFT task
-  // writes the bands and then bumps the counter, so a counter that did not move while copying means
-  // the copy is of that frame.
-  bool readFrame(orion::Frame& f, Ms now) {
-    um_data_t* um = nullptr;
-    if (!UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE) || !um || um->u_size < 10) return false;
-    const volatile uint32_t* counter = (const volatile uint32_t*)um->u_data[9];
-    for (int attempt = 0; attempt < 3; attempt++) {
-      const uint32_t id = *counter;
-      if (id == lastFrameId) return false;
-      memcpy(f.raw, um->u_data[8], sizeof f.raw);
-      if (*counter != id) continue;
-      f.id = lastFrameId = id;
-      f.at = now;
-      f.volume = *(const float*)um->u_data[0];
-      return true;
-    }
-    return false;
-  }
-
   void conduct(Ms now) {
-    orion::Frame f;
-    if (!readFrame(f, now)) return;
-    lastFrame = f;
-    const uint32_t t0 = micros();
-    const orion::Score& s = conductor->step(f);
-    engine.stepUs.add(micros() - t0);
+    bool stepped = false;
+    eachNewFrame(lastFrameId, [&](const orion::Frame& f) {
+      lastFrame = f;
+      const uint32_t t0 = micros();
+      engine.last = conductor->step(f);
+      engine.stepUs.add(micros() - t0);
+      const orion::Conductor::Debug d = conductor->debug();
+      stepNotes[f.id % 128] = {f.id, (uint8_t)engine.last.section, d.kickActivity, d.lowRel, d.allRel};
+      stepped = true;
+    });
+    if (!stepped) return;
+    const orion::Score& s = engine.last;
     engine.player.acceptOwn(s);
-    engine.last = s;
     if (!udpOpen) return;
     uint8_t buf[orion::kMaxPacket];
     const size_t n = orion::encode(s, buf, sizeof buf);
@@ -588,13 +606,13 @@ class OrionUsermod : public Usermod {
   }
 
   void loop() override {
-    traceAudio();
     const Ms now = millis();
     if (conductorRole != (conductor != nullptr)) {
       delete conductor;
       conductor = conductorRole ? new orion::Conductor(hw_random8()) : nullptr;
     }
     if (conductor) conduct(now);
+    traceAudio();                                      // after the conductor, so its notes are in
     if (now == lastPoll) return;                       // the UDP socket needs no polling faster than 1 kHz
     if (elapsed(now, lastLoop) > (int32_t)loopMax) loopMax = elapsed(now, lastLoop);
     lastLoop = lastPoll = now;

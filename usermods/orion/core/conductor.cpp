@@ -70,13 +70,18 @@ struct Bands {
   float log[kBands] = {};                              // compressed level, for spectral change
   float flux[kBands] = {};                             // rise against the band's long-term level
   bool primed = false;
+  uint32_t n = 0;                                      // frames since priming
 
   void update(const float* raw) {
+    // A running mean until the window fills, then the EMA: averages primed on room noise must not
+    // take 30 s to reach the music, or the first kicks read as huge and every later kick as weak.
+    n++;
+    const float meanRate = fmaxf(1.0f / 215, 1.0f / n), slowRate = fmaxf(1.0f / 1300, 1.0f / n);
     for (int b = 0; b < kBands; b++) {
       const float v = raw[b] > 0 ? raw[b] : 0;
       if (!primed) mean[b] = slow[b] = level[b] = v + 1e-6f;
-      mean[b] += (v - mean[b]) * (1.0f / 215);
-      slow[b] += (v - slow[b]) * (1.0f / 1300);
+      mean[b] += (v - mean[b]) * meanRate;
+      slow[b] += (v - slow[b]) * slowRate;
       rise[b] = fmaxf(0, v - level[b]);
       level[b] = v;
       // Linear rise against the band's long-term level: level and tilt invariant, unlike a log
@@ -260,6 +265,8 @@ struct Conductor::State {
   bool ramping = false;                                // mid+high rising bar after bar
   int snareBeat = 0, snareBeats[kBeatsPerBar] = {};    // snare onsets per recent beat
   float kickRef = 1e-6f, kickBeat = 0, kickAct = 0;
+  bool relearn = false;                                // set by 3 s of silence, cleared by the music after it
+  uint32_t levelN = 0;                                 // frames since the levels were primed
   float kickBeats[kBeatsPerBar] = {};                  // strongest kick flux per recent beat
   bool levelsPrimed = false;
 
@@ -633,14 +640,16 @@ void Conductor::State::updateLevels(const Frame& f) {
     lowFast = lowSlow = lowLong = l;
     allShort = allLong = a;
     levelsPrimed = true;
+    levelN = 0;
   }
+  levelN++;
   lowNow = l;
   lowFast += (l - lowFast) * 0.3f;
   lowSlow += (l - lowSlow) * 0.02f;
   // The bass level of grooves: held through breakdowns, so a drop can be measured against it.
   if (beatPresent) lowLong += (l - lowLong) * (1.0f / 1300);
   allShort += (a - allShort) * 0.01f;
-  allLong += (a - allLong) * (1.0f / 2600);
+  allLong += (a - allLong) * fmaxf(1.0f / 2600, 1.0f / levelN);
   upperSum += log2f(up / 12 + 1e-6f);
   upperN++;
 }
@@ -820,6 +829,15 @@ void Conductor::State::step(const Frame& f) {
   silentMs = silent ? silentMs + frames * frameMs : 0;
   musicMs = silent ? 0 : musicMs + frames * frameMs;
 
+  // Music after 3 s of silence is a new start: re-learn every level reference from it, so room noise
+  // heard before it (or a different track's loudness) does not skew kick presence and levels.
+  if (silentMs >= 3000) relearn = true;
+  if (!silent && relearn) {
+    bands = Bands();
+    levelsPrimed = false;
+    kickRef = 1e-6f;
+    relearn = false;
+  }
   // Silence leaves the tempo autocorrelation as it was, so a track that pauses (or a breakdown
   // quiet enough to close the AR noise gate) picks its tempo up again at once.
   if (silent) {
