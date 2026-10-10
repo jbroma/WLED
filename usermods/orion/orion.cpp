@@ -1,5 +1,11 @@
 #include "wled.h"
 
+#include "core/conductor.h"
+#include "core/looks.h"
+#include "core/player.h"
+#include "core/room.h"
+#include "core/wire.h"
+
 // Orion effects for the Orion homelab controllers (custom_usermods = audioreactive orion).
 //
 // Metadata string format: https://kno.wled.ge/interfaces/json-api/#effect-metadata
@@ -163,11 +169,12 @@ static const char _data_FX_MODE_ORION_AURORA[] PROGMEM = "Orion Aurora@!,Waves,L
 
 /*
  * Trace: the AudioReactive frames this controller saw, for offline analysis.
- * GET /orion/trace?since=N returns up to 120 frames newer than sequence N still
+ * GET /orion/trace?since=N returns up to 80 frames newer than sequence N still
  * in the ring, one per line:
  *   seq ms fftFrame volumeSmth b0..b15 r0..r15
  * b is fftResult (0..255) and r the raw linear channel magnitude from the
- * patched AudioReactive (um_data slot 8), stored as uint16 of r * 8.
+ * patched AudioReactive (um_data slot 8). The ring keeps r as log2(1 + r) in
+ * 1/2048 steps: 0.03% precision over the whole range.
  * A since beyond the newest frame returns just the newest sequence number, so
  * a reader can start from "now". The response is built in RAM, hence the cap.
  * The ring is allocated on the first request, so idle controllers pay nothing.
@@ -200,7 +207,8 @@ static void traceAudio() {
   f.fftFrame = fftFrame;
   f.vol = *(const float*)um->u_data[0];
   memcpy(f.bands, bands, 16);
-  for (int b = 0; b < 16; b++) f.raw[b] = hasRaw ? (uint16_t)min(65535.0f, ((const float*)um->u_data[8])[b] * 8.0f) : 0;
+  for (int b = 0; b < 16; b++)
+    f.raw[b] = hasRaw ? (uint16_t)min(65535.0f, log2f(1.0f + ((const float*)um->u_data[8])[b]) * 2048.0f + 0.5f) : 0;
   traceSeq++;
 }
 
@@ -216,30 +224,386 @@ static void serveTrace(AsyncWebServerRequest* request) {
   }
   const uint32_t oldest = traceSeq > TRACE_LEN ? traceSeq - TRACE_LEN : 0;
   if (since < oldest) since = oldest;
-  const uint32_t end = min(traceSeq, since + 120);
+  const uint32_t end = min(traceSeq, since + 80);
   for (uint32_t seq = since; seq < end; seq++) {
     const TraceFrame& f = traceRing[seq % TRACE_LEN];
     out->printf("%u %u %u %.2f", seq + 1, f.ms, f.fftFrame, f.vol);
     for (int b = 0; b < 16; b++) out->printf(" %u", f.bands[b]);
-    for (int b = 0; b < 16; b++) out->printf(" %u", f.raw[b]);
+    for (int b = 0; b < 16; b++) out->printf(" %.1f", exp2f(f.raw[b] / 2048.0f) - 1.0f);
     out->print('\n');
   }
   request->send(out);
 }
 
+/*
+ * Orion Party: the music-reactive look of the living room.
+ *
+ * The controller whose AudioReactive sync mode is send is the conductor. It turns each FFT frame into
+ * a Score (core/conductor.h) and unicasts it to every follower that joined (core/wire.h). Every
+ * controller, the conductor included, derives one Moment per rendered frame from the newest Score and
+ * its clock (core/player.h) and colours its own LEDs from /orion-room.json (core/looks.h).
+ *
+ * Sliders: Speed sx, Intensity ix, Look c1 (0 = autopilot, k = look k-1), Palette c2 (same), Floor c3.
+ * Presets must use of=0, mi=false, rev=false, grp=1 so segment pixel i is strip pixel start+i.
+ *
+ * GET /orion/state reports the link and timing. {"orion":{"lead":N}} on /json/state sets the
+ * milliseconds the picture is drawn ahead of the clock (not saved).
+ */
+namespace {
+
+using orion::elapsed;
+using orion::Ms;
+
+struct Stat {
+  uint32_t last = 0, max = 0;                          // max since /orion/state was last read
+  float avg = 0;
+  void add(uint32_t v) {
+    last = v;
+    avg += ((float)v - avg) / 16;
+    if (v > max) max = v;
+  }
+};
+
+// Everything the effect and the usermod share.
+struct Engine {
+  orion::Room room;
+  orion::Player player;
+  orion::Score last;                                   // newest Score, for /orion/state only
+  orion::Moment moment;                                // computed once per rendered frame
+  unsigned long momentFor = 0;                         // strip.now the Moment was computed for
+  bool momentValid = false;
+  int leadMs = 40;
+  uint32_t frameUs = 0;                                // render time of the frame in progress, all segments
+  Stat renderUs, stepUs;
+} engine;
+
+uint8_t toByte(float v) { return (uint8_t)(v * 255.0f + 0.5f); }   // render() already clamps to 0..1
+
+// Upper edges of the buckets /orion/state counts Score inter-arrival times in; one more bucket for the rest.
+const uint8_t kGapEdges[8] = {2, 5, 10, 20, 30, 40, 60, 100};
+
+}  // namespace
+
+static void mode_orion_party(void) {
+  const uint32_t t0 = micros();
+  if (!engine.momentValid || engine.momentFor != strip.now) {
+    engine.renderUs.add(engine.frameUs);
+    engine.frameUs = 0;
+    engine.moment = engine.player.moment(millis(), engine.leadMs);
+    engine.momentFor = strip.now;
+    engine.momentValid = true;
+  }
+  if (engine.room.size() == 0) {
+    SEGMENT.fill(BLACK);
+  } else {
+    const orion::Params p = {SEGMENT.intensity / 255.0f, SEGMENT.custom3 / 31.0f, SEGMENT.speed / 255.0f,
+                             (int)SEGMENT.custom1 - 1, (int)SEGMENT.custom2 - 1};
+    const unsigned len = SEGLEN, start = SEGMENT.start;
+    for (unsigned i = 0; i < len; i++) {
+      const orion::Rgbf c = orion::render(engine.moment, engine.room.at(start + i), p);
+      SEGMENT.setPixelColor(i, RGBW32(toByte(c.r), toByte(c.g), toByte(c.b), 0));
+    }
+  }
+  engine.frameUs += micros() - t0;
+}
+static const char _data_FX_MODE_ORION_PARTY[] PROGMEM = "Orion Party@Speed,Intensity,Look,Palette,Floor;;;;sx=128,ix=204,c1=0,c2=0,c3=3";
+
 class OrionUsermod : public Usermod {
+  struct Subscriber {
+    IPAddress ip;
+    uint16_t port = 0;
+    Ms lastJoin = 0;
+    bool used = false;
+  };
+
   bool routed = false;
+  bool conductorRole = false;                          // AudioReactive sync mode is send
+  orion::Conductor* conductor = nullptr;
+  uint32_t lastFrameId = 0;
+  orion::Frame lastFrame = {};                         // newest conductor input, for /orion/state only
+
+  WiFiUDP udp;
+  bool udpOpen = false;
+  Subscriber subs[orion::kMaxSubscribers];
+  Ms nextBeacon = 0, nextJoin = 0;
+  uint32_t sent = 0, sendFailures = 0;
+
+  IPAddress conductorIp;
+  uint8_t beaconEpoch = 0;
+  bool haveConductor = false;
+  Ms lastBeacon = 0, lastRx = 0, lastAccept = 0;
+  bool haveRx = false;
+  uint32_t bad = 0, gapHist[9] = {}, gapMax = 0;
+
+  Ms lastLoop = 0, lastPoll = 0;
+  uint32_t loopMax = 0;                                // longest time between loop() calls since /orion/state was read
+
+  void openSocket() {
+    udp.stop();
+    udpOpen = udp.beginMulticast(IPAddress(239, 0, 0, 1), orion::kPort);
+  }
+
+  // The newest AudioReactive FFT frame, or false when there is none since the last call. The FFT task
+  // writes the bands and then bumps the counter, so a counter that did not move while copying means
+  // the copy is of that frame.
+  bool readFrame(orion::Frame& f, Ms now) {
+    um_data_t* um = nullptr;
+    if (!UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE) || !um || um->u_size < 10) return false;
+    const volatile uint32_t* counter = (const volatile uint32_t*)um->u_data[9];
+    for (int attempt = 0; attempt < 3; attempt++) {
+      const uint32_t id = *counter;
+      if (id == lastFrameId) return false;
+      memcpy(f.raw, um->u_data[8], sizeof f.raw);
+      if (*counter != id) continue;
+      f.id = lastFrameId = id;
+      f.at = now;
+      f.volume = *(const float*)um->u_data[0];
+      return true;
+    }
+    return false;
+  }
+
+  void conduct(Ms now) {
+    orion::Frame f;
+    if (!readFrame(f, now)) return;
+    lastFrame = f;
+    const uint32_t t0 = micros();
+    const orion::Score& s = conductor->step(f);
+    engine.stepUs.add(micros() - t0);
+    engine.player.acceptOwn(s);
+    engine.last = s;
+    if (!udpOpen) return;
+    uint8_t buf[orion::kMaxPacket];
+    const size_t n = orion::encode(s, buf, sizeof buf);
+    for (Subscriber& sub : subs) {
+      if (!sub.used) continue;
+      if (elapsed(now, sub.lastJoin) > (int32_t)orion::kSubscriberExpiryMs) { sub.used = false; continue; }
+      if (udp.beginPacket(sub.ip, sub.port)) {
+        udp.write(buf, n);
+        if (udp.endPacket()) { sent++; continue; }
+      }
+      sendFailures++;
+    }
+  }
+
+  void subscribe(IPAddress ip, uint16_t port, Ms now) {
+    Subscriber* slot = nullptr;
+    for (Subscriber& s : subs)
+      if (s.used && s.ip == ip) { slot = &s; break; }
+    if (!slot)
+      for (Subscriber& s : subs)
+        if (!s.used || elapsed(now, s.lastJoin) > (int32_t)orion::kSubscriberExpiryMs) { slot = &s; break; }
+    if (!slot) return;
+    slot->ip = ip;
+    slot->port = port;
+    slot->lastJoin = now;
+    slot->used = true;
+  }
+
+  void follow(const uint8_t* buf, size_t len, Ms now) {
+    orion::Score s;
+    if (!orion::decode(buf, len, s)) { bad++; return; }
+    if (haveRx) {
+      const uint32_t gap = (uint32_t)elapsed(now, lastRx);
+      size_t b = 0;
+      while (b < 8 && gap >= kGapEdges[b]) b++;
+      gapHist[b]++;
+      if (gap > gapMax) gapMax = gap;
+    }
+    haveRx = true;
+    lastRx = now;
+    const uint32_t before = engine.player.stats(now).received;
+    engine.player.accept(s, now);
+    bool accepted = engine.player.stats(now).received != before;
+    if (!accepted && elapsed(now, lastAccept) > 3000) {
+      // Scores keep arriving but none is newer: a conductor that restarted into the same epoch with
+      // a lower sequence number. Start over from this one.
+      engine.player = orion::Player();
+      engine.player.accept(s, now);
+      accepted = true;
+    }
+    if (accepted) {
+      lastAccept = now;
+      engine.last = s;
+    }
+  }
+
+  void receive(Ms now) {
+    uint8_t buf[orion::kMaxPacket];
+    for (int n = 0; n < 8; n++) {
+      const int len = udp.parsePacket();
+      if (len <= 0) return;
+      const IPAddress from = udp.remoteIP();
+      const uint16_t port = udp.remotePort();
+      if (len > (int)sizeof buf) { udp.flush(); continue; }
+      udp.read(buf, sizeof buf);
+      switch (orion::classify(buf, len)) {
+        case orion::Packet::Score:
+          if (!conductor) follow(buf, len, now);
+          break;
+        case orion::Packet::Join:
+          if (conductor) subscribe(from, port, now);
+          break;
+        case orion::Packet::Beacon:
+          if (conductor || !orion::decodeBeacon(buf, len, beaconEpoch)) break;
+          if (!haveConductor || !(from == conductorIp)) nextJoin = now;
+          conductorIp = from;
+          haveConductor = true;
+          lastBeacon = now;
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  void announce(Ms now) {
+    uint8_t buf[orion::kMaxPacket];
+    if (conductor) {
+      if (elapsed(now, nextBeacon) < 0) return;
+      nextBeacon = now + orion::kBeaconMs;
+      const size_t n = orion::encodeBeacon(conductor->score().epoch, buf, sizeof buf);
+      if (udp.beginMulticastPacket()) {
+        udp.write(buf, n);
+        udp.endPacket();
+      }
+    } else if (haveConductor && elapsed(now, nextJoin) >= 0) {
+      nextJoin = now + orion::kJoinMs;
+      const size_t n = orion::encodeJoin(buf, sizeof buf);
+      if (udp.beginPacket(conductorIp, orion::kPort)) {
+        udp.write(buf, n);
+        udp.endPacket();
+      }
+    }
+  }
+
+  void loadRoom() {
+    File f = WLED_FS.open("/orion-room.json", "r");
+    if (!f) return;
+    const size_t n = f.size();
+    char* text = (char*)malloc(n + 1);
+    if (text) {
+      const size_t got = f.readBytes(text, n);
+      engine.room.parse(text, got);
+      free(text);
+    }
+    f.close();
+  }
+
+  void writeState(AsyncWebServerRequest* request) {
+    const Ms now = millis();
+    const orion::Player::Stats st = engine.player.stats(now);
+    const orion::Moment m = engine.player.moment(now, 0);
+    const orion::Score s = engine.last;
+    AsyncResponseStream* out = request->beginResponseStream("application/json");
+    out->printf("{\"role\":\"%s\",\"epoch\":%u,\"seq\":%u,\"received\":%u,\"gaps\":%u,\"offsetMs\":%d,\"ageMs\":%u,"
+                "\"millis\":%u,\"beat\":%.4f,\"bpm\":%.2f,\"conf\":%u,\"bar\":%d,\"section\":%u,\"look\":%u,\"palette\":%u,"
+                "\"leds\":%u,\"lead\":%d,\"frame\":%u,",
+                conductor ? "conductor" : "follower", s.epoch, s.seq, st.received, st.gaps, (int)st.offsetMs,
+                st.ageMs, now, m.beat, 60.0f / m.spb, s.grid.conf, (int)m.bar, (unsigned)m.section, m.look,
+                m.palette, (unsigned)engine.room.size(), engine.leadMs, lastFrameId);
+    if (conductor) {
+      const orion::Conductor::Debug d = conductor->debug();
+      out->printf("\"volume\":%.1f,\"low\":%u,\"mid\":%u,\"high\":%u,\"level\":%u,\"raw\":[", lastFrame.volume, s.low, s.mid,
+                  s.high, s.level);
+      for (int b = 0; b < orion::kBands; b++) out->printf("%s%.0f", b ? "," : "", lastFrame.raw[b]);
+      out->printf("],\"sent\":%u,\"sendFail\":%u,\"analysis\":{\"onset\":%.3f,\"bpm\":%.2f,\"tempoStrength\":%.3f},"
+                  "\"subscribers\":[", sent, sendFailures, d.onset, d.bpm, d.tempoStrength);
+      bool first = true;
+      for (const Subscriber& sub : subs) {
+        if (!sub.used) continue;
+        out->printf("%s{\"ip\":\"%s\",\"ageMs\":%u}", first ? "" : ",", sub.ip.toString().c_str(), now - sub.lastJoin);
+        first = false;
+      }
+      out->print("],");
+    } else {
+      if (haveConductor)
+        out->printf("\"conductor\":\"%s\",\"beaconEpoch\":%u,\"beaconAgeMs\":%u,", conductorIp.toString().c_str(),
+                    beaconEpoch, now - lastBeacon);
+      else
+        out->print("\"conductor\":null,");
+      out->printf("\"bad\":%u,\"gapMaxMs\":%u,\"arrival\":[", bad, gapMax);
+      for (int b = 0; b < 9; b++) out->printf("%s%u", b ? "," : "", gapHist[b]);
+      out->print("],");
+    }
+    out->printf("\"stepUs\":{\"last\":%u,\"avg\":%.0f,\"max\":%u},\"renderUs\":{\"last\":%u,\"avg\":%.0f,\"max\":%u},"
+                "\"loopMaxMs\":%u}",
+                engine.stepUs.last, engine.stepUs.avg, engine.stepUs.max, engine.renderUs.last,
+                engine.renderUs.avg, engine.renderUs.max, loopMax);
+    request->send(out);
+    engine.stepUs.max = engine.renderUs.max = loopMax = 0;
+  }
+
  public:
   void setup() override {
     strip.addEffect(255, &mode_orion_aurora, _data_FX_MODE_ORION_AURORA);
+    strip.addEffect(255, &mode_orion_party, _data_FX_MODE_ORION_PARTY);
+    loadRoom();
   }
+
+  // readFromConfig() gets the whole "um" object of cfg.json (cfg.cpp passes doc["um"] to every
+  // usermod), so another usermod's settings can be read here, whatever order they load in.
+  bool readFromConfig(JsonObject& root) override {
+    conductorRole = ((root["AudioReactive"]["sync"]["mode"] | 0) & 1) != 0;
+    return true;
+  }
+
+  void readFromJsonState(JsonObject& root) override {
+    JsonObject o = root["orion"];
+    if (!o.isNull() && o["lead"].is<int>()) engine.leadMs = constrain(o["lead"].as<int>(), 0, 500);
+  }
+
   void connected() override {
+    openSocket();
     if (routed) return;
     server.on(F("/orion/trace"), HTTP_GET, serveTrace);
+    server.on(F("/orion/state"), HTTP_GET, [this](AsyncWebServerRequest* request) { writeState(request); });
     routed = true;
   }
-  void loop() override { traceAudio(); }
+
+  void onUpdateBegin(bool init) override {
+    if (init) {
+      udp.stop();
+      udpOpen = false;
+    } else if (WiFi.status() == WL_CONNECTED) {
+      openSocket();
+    }
+  }
+
+  void addToJsonInfo(JsonObject& root) override {
+    JsonObject user = root["u"];
+    if (user.isNull()) user = root.createNestedObject("u");
+    JsonArray row = user.createNestedArray(F("Orion"));
+    char text[48];
+    if (conductor) {
+      int followers = 0;
+      for (const Subscriber& sub : subs) followers += sub.used;
+      snprintf(text, sizeof text, "conductor, %d followers", followers);
+    } else if (engine.player.hasScore()) {
+      snprintf(text, sizeof text, "follower, Score %u ms old", engine.player.stats(millis()).ageMs);
+    } else {
+      snprintf(text, sizeof text, "follower, no conductor");
+    }
+    row.add(String(text));
+  }
+
+  void loop() override {
+    traceAudio();
+    const Ms now = millis();
+    if (conductorRole != (conductor != nullptr)) {
+      delete conductor;
+      conductor = conductorRole ? new orion::Conductor(hw_random8()) : nullptr;
+    }
+    if (conductor) conduct(now);
+    if (now == lastPoll) return;                       // the UDP socket needs no polling faster than 1 kHz
+    if (elapsed(now, lastLoop) > (int32_t)loopMax) loopMax = elapsed(now, lastLoop);
+    lastLoop = lastPoll = now;
+    if (udpOpen) {
+      receive(now);
+      announce(now);
+    }
+  }
 };
 
-static OrionUsermod orion;
-REGISTER_USERMOD(orion);
+static OrionUsermod orionUsermod;
+REGISTER_USERMOD(orionUsermod);
