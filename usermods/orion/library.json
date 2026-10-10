@@ -1,0 +1,7 @@
+{
+  "name": "orion",
+  "build": {
+    "libArchive": false,
+    "srcFilter": ["+<*.cpp>", "+<core/*.cpp>"]
+  }
+}

@@ -225,6 +225,10 @@ static uint64_t sampleTime = 0;
 
 // FFT Task variables (filtering and post-processing)
 static float   fftCalc[NUM_GEQ_CHANNELS] = {0.0f};                    // Try and normalize fftBin values to a max of 4096, so that 4096/16 = 256.
+// Orion: the GEQ channels before gain, smoothing and scaling (linear magnitude), and a count of
+// FFT cycles that produced them. Exported as um_data slots 8 and 9 for analysis usermods.
+static float    fftRaw[NUM_GEQ_CHANNELS] = {0.0f};
+static uint32_t fftFrames = 0;
 static float   fftAvg[NUM_GEQ_CHANNELS] = {0.0f};                     // Calculated frequency channel results, with smoothing (used if dynamics limiter is ON)
 #ifdef SR_DEBUG
 static float   fftResultMax[NUM_GEQ_CHANNELS] = {0.0f};               // A table used for testing to determine how our post-processing is working.
@@ -551,6 +555,9 @@ void FFTcode(void * parameter)
     }
 
     // post-processing of frequency channels (pink noise adjustment, AGC, smoothing, scaling)
+    if (fabsf(sampleAvg) > 0.5f) memcpy(fftRaw, fftCalc, sizeof(fftRaw));      // same gate as the channel mapping above
+    else for (int i = 0; i < NUM_GEQ_CHANNELS; i++) fftRaw[i] *= 0.85f;
+    fftFrames++;
     postProcessFFTResults((fabsf(sampleAvg) > 0.25f)? true : false , NUM_GEQ_CHANNELS);
 
 #if defined(WLED_DEBUG) || defined(SR_DEBUG)
@@ -1353,7 +1360,7 @@ class AudioReactive : public Usermod {
         // usermod exchangeable data
         // we will assign all usermod exportable data here as pointers to original variables or arrays and allocate memory for pointers
         um_data = new um_data_t;
-        um_data->u_size = 8;
+        um_data->u_size = 10;
         um_data->u_type = new um_types_t[um_data->u_size];
         um_data->u_data = new void*[um_data->u_size];
         um_data->u_data[0] = &volumeSmth;      //*used (New)
@@ -1372,6 +1379,10 @@ class AudioReactive : public Usermod {
         um_data->u_type[6] = UMT_BYTE;
         um_data->u_data[7] = &binNum;          // assigned in effect function from UI element!!! (Puddlepeak, Ripplepeak, Waterfall)
         um_data->u_type[7] = UMT_BYTE;
+        um_data->u_data[8] = fftRaw;           // Orion: linear GEQ channels before post-processing
+        um_data->u_type[8] = UMT_FLOAT_ARR;
+        um_data->u_data[9] = &fftFrames;       // Orion: FFT cycles completed, read before and after copying slot 8
+        um_data->u_type[9] = UMT_UINT32;
       }
 
 
