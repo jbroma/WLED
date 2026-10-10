@@ -3,10 +3,11 @@
 Lets looks be designed and reviewed before the real analyzer exists, and gives the analyzer a
 target: its Scores should come close to these.
 
-  python truth_scores.py TRACK.json OUT.scores [--looks N] [--palettes N]
+  python truth_scores.py TRACK.json OUT.scores [--looks N] [--palettes N] [--onsets]
 
 Look and palette change every phrase (8 bars), announced two beats ahead, cycling through the
-library, so one track shows every look in every kind of section.
+library, so one track shows every look in every kind of section. --onsets also reports every drum
+hit as a detected onset (not only the build's snare roll), as a conductor without tempo lock would.
 """
 import argparse
 import json
@@ -32,6 +33,7 @@ def main():
     ap.add_argument("out")
     ap.add_argument("--looks", type=int, default=1)
     ap.add_argument("--palettes", type=int, default=1)
+    ap.add_argument("--onsets", action="store_true")
     args = ap.parse_args()
     truth = json.load(open(args.truth))
     bpm, spb = truth["bpm"], 60 / truth["bpm"]
@@ -90,6 +92,10 @@ def main():
             high = min(1, env(t, {"hat"}, 0.05))
             recent = [h for h in roll if 0 <= t - h < 0.8][::-1][:8]
             onsets = [(1000 + roll.index(h), 1, 150, T0 + round(h * 1000)) for h in recent]
+            if args.onsets:
+                voice = {"kick": 0, "snare": 1, "hat": 2, "roll": 1}
+                recent = [(i, h, v) for i, (h, v) in enumerate(hits) if 0 <= t - h < 0.8][::-1][:8]
+                onsets = [(i % 65536, voice[v], LEVEL.get(v, 150), T0 + round(h * 1000)) for i, h, v in recent]
             fields = [T0 + round(t * 1000), 1, f % 65536,
                       T0 + round(truth["beats"][0] * 1000), 0, round(spb * 1e6), 255, 0, 0,
                       SECTION[s["name"]], round(energy * 255), round(tension * 255),

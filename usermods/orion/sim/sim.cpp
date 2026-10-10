@@ -3,10 +3,11 @@
 //
 //   orion-sim --frames F.frames | --scores F.scores  --rooms DIR  --out PREFIX
 //             [--fps 30] [--lead MS] [--program N] [--palette N]
-//             [--intensity 0..1] [--floor 0..1] [--speed 0..1] [--from S] [--to S]
+//             [--intensity 0..1] [--floor 0..1] [--speed 0..1] [--from S] [--to S] [--autopilot 1]
 //
 // --frames  lines "ms id volume r0..r15" (raw AR bands): runs the Conductor.
 // --scores  lines written by score_text.h: renders those Scores as they are.
+// --autopilot 1  replaces the cues with the looks' section pools, as the conductor's autopilot would.
 // Writes PREFIX.bin (header "ORS1", fps, room count, per room: LED count and a 32-byte name; then
 // per frame: uint32 conductor ms and RGB bytes for every LED of every room) and PREFIX.scores.
 #include <dirent.h>
@@ -92,6 +93,34 @@ std::vector<Score> scoresFromText(const char* path) {
   return out;
 }
 
+// Re-cues the Scores the way the conductor's autopilot would: per phrase, a look from
+// poolFor(section at the phrase start) (the drop's later phrases from the Groove pool) and the next
+// palette, announced 2 beats ahead and kept pending through its one-beat cross-fade. It reads the
+// section from future Scores, so it is a perfect autopilot.
+void autopilot(std::vector<Score>& scores) {
+  const int32_t perPhrase = kBeatsPerBar * kBarsPerPhrase;
+  auto sectionAt = [&](double ms) {
+    auto it = std::upper_bound(scores.begin(), scores.end(), ms, [](double t, const Score& s) { return t < s.txMs; });
+    return it == scores.begin() ? scores.front().section : (it - 1)->section;
+  };
+  for (Score& s : scores) {
+    const Grid& g = s.grid;
+    const double msPerBeat = g.periodUs / 1000.0;
+    auto cue = [&](int32_t phrase) {
+      const int32_t at = g.phraseBeat + phrase * perPhrase;
+      const double atMs = g.anchorMs + (at - g.anchorBeat) * msPerBeat + 50;
+      Section section = sectionAt(atMs);
+      if (section == Section::Drop && sectionAt(atMs - perPhrase * msPerBeat) == Section::Drop) section = Section::Groove;
+      const Pool& pool = poolFor(section);
+      return Cue{pool.looks[(uint32_t)phrase % pool.count], (uint8_t)((uint32_t)phrase % kPaletteCount), at};
+    };
+    const double beat = g.anchorBeat + elapsed(s.txMs, g.anchorMs) / msPerBeat;
+    const int32_t phrase = (int32_t)floor((beat - g.phraseBeat + 2) / perPhrase);
+    s.next = cue(phrase);
+    s.cur = beat - s.next.atBeat < 1 ? cue(phrase - 1) : s.next;
+  }
+}
+
 uint8_t byte(float v) { return (uint8_t)lroundf(fminf(1, fmaxf(0, v)) * 255); }
 
 }  // namespace
@@ -99,6 +128,7 @@ uint8_t byte(float v) { return (uint8_t)lroundf(fminf(1, fmaxf(0, v)) * 255); }
 int main(int argc, char** argv) {
   const char *frames = nullptr, *scoresIn = nullptr, *roomDir = nullptr, *out = nullptr;
   int fps = 30, lead = 0;
+  bool pilot = false;
   double from = 0, to = 1e9;
   Params p = {0.8f, 0.08f, 0.5f, -1, -1};
   for (int i = 1; i + 1 < argc; i += 2) {
@@ -117,6 +147,7 @@ int main(int argc, char** argv) {
     else if (k == "--speed") p.speed = (float)atof(v);
     else if (k == "--from") from = atof(v);
     else if (k == "--to") to = atof(v);
+    else if (k == "--autopilot") pilot = atoi(v) != 0;
     else { fprintf(stderr, "unknown option %s\n", argv[i]); return 2; }
   }
   if (!(frames || scoresIn) || !roomDir || !out) {
@@ -124,7 +155,8 @@ int main(int argc, char** argv) {
     return 2;
   }
   const std::vector<NamedRoom> rooms = loadRooms(roomDir);
-  const std::vector<Score> scores = frames ? scoresFromFrames(frames) : scoresFromText(scoresIn);
+  std::vector<Score> scores = frames ? scoresFromFrames(frames) : scoresFromText(scoresIn);
+  if (pilot && !scores.empty()) autopilot(scores);
   if (scores.empty() || rooms.empty()) { fprintf(stderr, "no scores or no rooms\n"); return 2; }
 
   FILE* dump = fopen((std::string(out) + ".scores").c_str(), "w");

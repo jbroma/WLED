@@ -5,7 +5,7 @@ HEADERS = $(wildcard ../core/*.h) $(wildcard *.h)
 SIMDATA = ../../../.sim
 BUILD = $(SIMDATA)/bin
 
-all: $(BUILD)/orion-sim $(BUILD)/orion-analyze
+all: $(BUILD)/orion-sim $(BUILD)/orion-analyze $(BUILD)/bench-looks
 
 $(BUILD)/orion-sim: sim.cpp $(CORE) $(HEADERS)
 	@mkdir -p $(BUILD)
@@ -14,6 +14,10 @@ $(BUILD)/orion-sim: sim.cpp $(CORE) $(HEADERS)
 $(BUILD)/orion-analyze: analyze.cpp $(CORE) $(HEADERS)
 	@mkdir -p $(BUILD)
 	$(CXX) $(CXXFLAGS) -o $@ analyze.cpp $(CORE)
+
+$(BUILD)/bench-looks: bench_looks.cpp $(CORE) $(HEADERS)
+	@mkdir -p $(BUILD)
+	$(CXX) $(CXXFLAGS) -o $@ bench_looks.cpp $(CORE)
 
 $(BUILD)/net-test: net_test.cpp $(CORE) $(HEADERS)
 	@mkdir -p $(BUILD)
