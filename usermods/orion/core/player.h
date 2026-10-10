@@ -1,4 +1,3 @@
-// Turns the latest Score and the local clock into the Moment every look draws.
 #pragma once
 #include "types.h"
 

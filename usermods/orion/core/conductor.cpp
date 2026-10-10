@@ -29,7 +29,7 @@ constexpr float kPhaseWeight[kVoices] = {1.0f, 1.0f, 0.15f};
 // A frame's onset shows up this long after the sound reached the mic (measured, eval_analysis.py).
 constexpr float kOnsetDelayMs = 18;
 
-constexpr int kTempoHist = 512;                        // onset function for the autocorrelation
+constexpr int kTempoHist = 512;
 constexpr int kMaxLag = 264;                           // 8 beats at 80 BPM, in frames
 constexpr int kPhaseHist = 256;                        // ~6 s for the beat phase
 constexpr float kMinBpm = 80, kBpmStep = 0.5f;
@@ -66,11 +66,11 @@ struct Bands {
   float mean[kBands] = {};                             // ~5 s average magnitude
   float slow[kBands] = {};                             // ~30 s average, for envelopes and levels
   float level[kBands] = {};
-  float rise[kBands] = {};                             // magnitude rise since the last frame
-  float log[kBands] = {};                              // compressed level, for spectral change
-  float flux[kBands] = {};                             // rise against the band's long-term level
+  float rise[kBands] = {};
+  float log[kBands] = {};
+  float flux[kBands] = {};
   bool primed = false;
-  uint32_t n = 0;                                      // frames since priming
+  uint32_t n = 0;
 
   void update(const float* raw) {
     // A running mean until the window fills, then the EMA: averages primed on room noise must not
@@ -109,15 +109,13 @@ struct Bands {
   }
 };
 
-// One voice's onset strength (0..1) and onset events.
 struct VoiceDetector {
   float ref = 0;                                       // flux peak, decays over ~3 s
   float slowRef = 0;                                   // flux peak, decays over ~30 s
-  float mean = 0, var = 0;                             // recent statistics of the strength
+  float mean = 0, var = 0;
   float strength = 0, prev = 0;
   double lastOnset = -1e9;
 
-  // Returns true when this frame starts an onset.
   bool update(float flux, int frames, double t, float refractoryMs) {
     ref = fmaxf(flux, ref * decay(0.9923f, frames));
     slowRef = fmaxf(flux, slowRef * decay(0.9992f, frames));
@@ -227,7 +225,6 @@ struct Conductor::State {
   Tempo tempo;
   int sinceTempo = 0;
 
-  // Phase onset function, the kick's share of it, and each sample's frame time.
   float hist[kPhaseHist] = {};
   float kickHist[kPhaseHist] = {};
   Ms histMs[kPhaseHist] = {};
@@ -241,40 +238,36 @@ struct Conductor::State {
   float hitRate = 0, peakAvg = 0.1f, phaseErr = 0;
   int hit = 0, disagree = 0, offPhase = 0;
 
-  // Downbeat: spectral change per beat, scored per position in the bar.
   float spanCur[kBands] = {}, spanNext[kBands] = {}, spanPrev[kBands] = {};
   int spanCurN = 0, spanNextN = 0;
   float changeAvg = 1e-3f;
   float barScore[kBeatsPerBar] = {};
-  float kickNear = 0, snareNear = 0;                   // strongest kick/snare right at the next beat
+  float kickNear = 0, snareNear = 0;
   int downPhase = 0;
   int32_t phraseBeat = 0;
 
-  // Groove: onset strength per voice and sixteenth, observed for the current and next bar.
   float groove[kVoices][kStepsPerBar] = {};
-  float kept[kVoices][kStepsPerBar] = {};              // the groove from before a breakdown
+  float kept[kVoices][kStepsPerBar] = {};
   float seen[2][kVoices][kStepsPerBar] = {};
   int32_t seenBar = 0;
 
-  // Levels in log2 units for sections.
-  float lowNow = 0, lowFast = 0, lowSlow = 0, lowLong = 0;  // kick-band level, log2
+  float lowNow = 0, lowFast = 0, lowSlow = 0, lowLong = 0;
   float allShort = 0, allLong = 0, upperSum = 0;
   int upperN = 0;
-  float upper[4 * kBeatsPerBar] = {};                  // mid+high level per beat, newest at [0]
-  float rise = 0;                                      // mid+high change over the last bar, log2
-  bool ramping = false;                                // mid+high rising bar after bar
-  int snareBeat = 0, snareBeats[kBeatsPerBar] = {};    // snare onsets per recent beat
+  float upper[4 * kBeatsPerBar] = {};
+  float rise = 0;
+  bool ramping = false;
+  int snareBeat = 0, snareBeats[kBeatsPerBar] = {};
   float kickRef = 1e-6f, kickBeat = 0, kickAct = 0;
-  bool relearn = false;                                // set by 3 s of silence, cleared by the music after it
-  uint32_t levelN = 0;                                 // frames since the levels were primed
-  float kickBeats[kBeatsPerBar] = {};                  // strongest kick flux per recent beat
+  bool relearn = false;
+  uint32_t levelN = 0;
+  float kickBeats[kBeatsPerBar] = {};
   bool levelsPrimed = false;
 
-  // Sections.
   Section section = Section::Silence;
   float silentMs = 0, musicMs = 0;
-  int32_t sectionBeat = 0;                             // where the section began, backdated for builds
-  int32_t enteredBeat = 0;                             // when the section was recognised
+  int32_t sectionBeat = 0;
+  int32_t enteredBeat = 0;
   int beatOn = 0, beatOff = 0, quietBeats = 0;
   bool beatPresent = false;
   int32_t lastDropBeat = -1000;
@@ -285,7 +278,6 @@ struct Conductor::State {
   float envPeak[4] = {}, envFloor[4] = {}, env[4] = {};
   bool envPrimed = false;
 
-  // Autopilot.
   uint32_t rng;
   uint8_t recent[2] = {255, 255};
   bool cueSection = false, cueDrop = false;
@@ -322,15 +314,12 @@ struct Conductor::State {
     return fmaxf(h[i % kPhaseHist], h[(i + 1) % kPhaseHist]);
   }
 
-  // How much onset energy a beat `ago` ms back (acoustic) and the five before it collect.
   float comb(const float* h, float ago) const {
     float s = 0, w = 1;
     for (int j = 0; j < 6; j++, w *= 0.7f) s += w * histValue(h, ago + j * period - kOnsetDelayMs);
     return s;
   }
 
-  // The beat between `from` and `to` ms back (acoustic, from > to) with the strongest comb,
-  // searched at history samples. Returns how far back it is.
   float bestPhase(const float* h, float from, float to, float& score) const {
     float best = to;
     score = -1;
@@ -347,7 +336,6 @@ struct Conductor::State {
     return best;
   }
 
-  // Moves the clock so a beat falls at acoustic time t, keeping beat numbers continuous.
   void setPhase(double t) {
     const int32_t number = running ? (int32_t)lround(beatAt(t)) : nextBeat;
     last = t;
@@ -492,7 +480,6 @@ void Conductor::State::updateTempo() {
   }
 }
 
-// Closes the spectral span of beat `number` and scores it as a bar start.
 void Conductor::State::closeBeatSpan(int32_t number) {
   if (spanCurN > 0) {
     float change = 0;
@@ -510,7 +497,6 @@ void Conductor::State::closeBeatSpan(int32_t number) {
   spanNextN = 0;
 }
 
-// Moves the bar start to beat phase `phase`, rotating the groove and phrase with it.
 void Conductor::State::shiftDownbeat(int phase) {
   int shift = phase - downPhase;
   if (shift == 0) return;
@@ -530,8 +516,6 @@ void Conductor::State::shiftDownbeat(int phase) {
 }
 
 void Conductor::State::evaluateBeat() {
-  // The strongest onset within a third of a beat of the prediction, gently weighted toward it.
-  // Offsets are (acoustic sample time - predicted beat), in ms.
   const float nextAgo = (float)(now - next);
   auto offset = [&](uint32_t i) { return nextAgo - ageOf(i) - kOnsetDelayMs; };
   const float reach = 0.3f * period;
@@ -610,7 +594,6 @@ void Conductor::State::evaluateBeat() {
 }
 
 void Conductor::State::trackBeats() {
-  // Frames before the predicted beat belong to the beat in progress, later ones to the next.
   const bool after = now - kOnsetDelayMs >= next;
   float* span = after ? spanNext : spanCur;
   for (int b = 0; b < kBands; b++) span[b] += bands.log[b];

@@ -63,7 +63,6 @@ def positions(rooms, room_dir):
 
 
 def draw(rgb, px, py):
-    """One frame: RGB bytes for every LED -> uint8 image."""
     col = rgb.reshape(-1, 3).astype(np.float32) / 255
     img = np.zeros((H, W, 3), np.float32)
     np.add.at(img, (py, px), col)

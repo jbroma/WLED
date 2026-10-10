@@ -24,7 +24,6 @@ const char* field(const char* json, const char* end, const char* key) {
   return nullptr;
 }
 
-// Reads a JSON array of numbers starting at p ('['). Returns the count read, or -1 on bad input.
 int numbers(const char* p, const char* end, std::vector<float>& out) {
   if (!p || p >= end || *p != '[') return -1;
   p++;

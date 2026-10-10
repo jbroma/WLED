@@ -10,12 +10,12 @@
 namespace orion {
 
 constexpr uint16_t kPort = 11989;
-constexpr Ms kBeaconMs = 1000;                         // conductor beacon period
-constexpr Ms kJoinMs = 1000;                           // follower join period
+constexpr Ms kBeaconMs = 1000;
+constexpr Ms kJoinMs = 1000;
 constexpr Ms kSubscriberExpiryMs = 6000;               // conductor drops a follower this long after its last join (rides out 4 lost joins)
 constexpr int kMaxSubscribers = 8;
 
-constexpr size_t kMaxPacket = 168;                     // room for any packet below
+constexpr size_t kMaxPacket = 168;
 
 enum class Packet : uint8_t { Unknown, Score, Beacon, Join };
 Packet classify(const uint8_t* in, size_t len);        // by magic only; the decoders do the validating

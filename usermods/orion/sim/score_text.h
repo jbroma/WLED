@@ -1,4 +1,3 @@
-// Score <-> one line of text, for simulator inputs and dumps. Field order follows types.h.
 #pragma once
 #include <stdio.h>
 

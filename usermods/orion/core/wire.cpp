@@ -122,7 +122,7 @@ bool decode(const uint8_t* in, size_t len, Score& out) {
   Score s;
   Reader r(in, len);
   layout(r, s);
-  if (r.bad || r.p != r.end) return false;             // wrong magic or version, too short, or trailing bytes
+  if (r.bad || r.p != r.end) return false;
   if (s.onsetCount > kOnsets || s.grid.periodUs == 0) return false;
   if ((uint8_t)s.section > (uint8_t)Section::Breakdown) return false;
   for (int i = 0; i < s.onsetCount; i++)

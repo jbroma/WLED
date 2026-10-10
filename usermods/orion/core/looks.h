@@ -1,4 +1,3 @@
-// The look library: what the room shows for a Moment.
 #pragma once
 #include "types.h"
 

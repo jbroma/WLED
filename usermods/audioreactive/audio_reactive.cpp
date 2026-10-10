@@ -227,8 +227,7 @@ static uint64_t sampleTime = 0;
 static float   fftCalc[NUM_GEQ_CHANNELS] = {0.0f};                    // Try and normalize fftBin values to a max of 4096, so that 4096/16 = 256.
 // Orion: the GEQ channels before gain, smoothing and scaling (linear magnitude) of the last
 // ORION_RAW_FRAMES FFT cycles, the millis() each cycle finished, and a count of cycles. A reader
-// whose loop stalls for less than the ring's span (~1.5 s) still gets every cycle. Exported as
-// um_data slots 8 (float[ORION_RAW_FRAMES][16]), 9 (count), 10 (finish times) and 11 (depth).
+// whose loop stalls for less than the ring's span (~1.5 s) still gets every cycle.
 #define ORION_RAW_FRAMES 64
 static float    fftRaw[ORION_RAW_FRAMES][NUM_GEQ_CHANNELS] = {};
 static uint32_t fftRawMs[ORION_RAW_FRAMES] = {};

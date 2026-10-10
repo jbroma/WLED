@@ -24,9 +24,7 @@ uint16_t hash3(int32_t a, int32_t b, int32_t c) {
 
 // How long each voice stays visible after it hits, in seconds.
 constexpr float kHitLife[kVoices] = {1.2f, 0.8f, 0.35f};
-// A detected onset this close to a predicted hit of the same voice is that hit.
 constexpr float kSameHit = 0.07f;
-// Groove steps at or above this strength are drawn as predicted hits.
 constexpr uint8_t kGrooveFloor = 64;
 
 void addHit(Moment& m, const Hit& h) {
@@ -34,7 +32,6 @@ void addHit(Moment& m, const Hit& h) {
     m.hits[m.hitCount++] = h;
     return;
   }
-  // Full: replace the oldest if this one is newer.
   int oldest = 0;
   for (int i = 1; i < kHits; i++)
     if (m.hits[i].age > m.hits[oldest].age) oldest = i;
@@ -45,13 +42,12 @@ void addHit(Moment& m, const Hit& h) {
 
 Moment momentAt(const Score& s, Ms at) {
   Moment m = {};
-  const float stale = elapsed(at, s.txMs) / 1000.0f;   // seconds since the conductor made this Score
+  const float stale = elapsed(at, s.txMs) / 1000.0f;
   const Grid& g = s.grid;
   const double spb = g.periodUs / 1e6;
   m.seconds = at / 1000.0;
   m.spb = (float)spb;
   m.beat = g.anchorBeat + elapsed(at, g.anchorMs) / 1000.0 / spb;
-  // Grid motion fades in with tempo confidence and out after 2 s without a fresh Score.
   m.lock = smooth(100, 180, g.conf) * clamp01(1 - (stale - 2) / 6);
 
   const double fromDownbeat = m.beat - g.downbeat;
@@ -77,10 +73,9 @@ Moment momentAt(const Score& s, Ms at) {
   if (s.next.atBeat > s.cur.atBeat && m.beat >= s.next.atBeat) {
     m.look = s.next.look;
     m.palette = s.next.palette;
-    m.xfade = clamp01((float)(m.beat - s.next.atBeat));   // one beat
+    m.xfade = clamp01((float)(m.beat - s.next.atBeat));
   }
 
-  // Predicted hits: replay the groove on this bar and the previous one.
   if (m.lock > 0.3f) {
     for (int v = 0; v < kVoices; v++) {
       for (int bar = m.bar - 1; bar <= m.bar; bar++) {
@@ -95,7 +90,6 @@ Moment momentAt(const Score& s, Ms at) {
       }
     }
   }
-  // Detected onsets the groove did not predict.
   const int predicted = m.hitCount;
   for (int i = 0; i < s.onsetCount && i < kOnsets; i++) {
     const Onset& o = s.onsets[i];
@@ -106,7 +100,6 @@ Moment momentAt(const Score& s, Ms at) {
       known = m.hits[h].voice == o.voice && fabsf(m.hits[h].age - age) < kSameHit;
     if (!known) addHit(m, {o.voice, age, o.strength / 255.0f, o.id});
   }
-  // Newest first.
   for (int i = 1; i < m.hitCount; i++)
     for (int j = i; j > 0 && m.hits[j].age < m.hits[j - 1].age; j--) {
       const Hit t = m.hits[j];

@@ -40,7 +40,7 @@ constexpr int kFollowers = 3;
 constexpr int64_t kSettleMs = 3000;
 constexpr double kBeatLimitMs = 10, kCueLimitMs = 10;
 constexpr int kRenderLimit = 2;                        // of 255
-constexpr int kShiftMs = 10;                           // the picture may be this far off in time and still count as the same
+constexpr int kShiftMs = 10;
 
 struct Config {
   std::string scores = "../../../.sim/bin/edm128.cues.scores";   // from sim/; `make net-test` writes it
@@ -53,7 +53,6 @@ struct Config {
 
 Ms wrap(int64_t v) { return (Ms)(uint64_t)v; }
 
-// The same Score as the conductor would send in another epoch: its own clock, sequence and numbering.
 Score reissue(Score s, uint8_t epoch, uint16_t seq, int64_t shift) {
   s.epoch = epoch;
   s.seq = seq;
@@ -80,7 +79,7 @@ struct Follower {
   double ppm = 0;
   bool knows = false;
   int64_t nextJoin = 0;
-  int epoch = -1;                                      // epoch of the newest accepted Score
+  int epoch = -1;
   int64_t firstScoreT = -1, lastBadT = -1;
   double worstSettleMs = 0, worstJoinMs = 0;
 };
@@ -114,8 +113,6 @@ int pixelDiff(const Pixels& a, const Pixels& b) {
   return d;
 }
 
-// Smallest difference between `ref` and what a follower draws at any instant within kShiftMs of `now`.
-// `guess` is the shift that aligns the beat, tried first.
 int shiftedDiff(const Pixels& ref, const Player& p, Ms now, int lead, int guess) {
   auto at = [&](int shift) { return pixelDiff(ref, draw(p.moment(now + (Ms)(int32_t)shift, lead))); };
   int best = 255;
@@ -141,7 +138,6 @@ void check(bool ok, const char* what) {
   if (!ok) { printf("FAIL  %s\n", what); fails++; }
 }
 
-// The codec on every truth Score, then the packets it must refuse.
 void checkWire(const std::vector<Score>& scores) {
   uint8_t buf[kMaxPacket];
   size_t minBytes = 1u << 30, maxBytes = 0;
@@ -226,8 +222,7 @@ Result simulate(const Config& cfg, const std::vector<Score>& truth, bool verbose
   const int64_t tEnd = (int64_t)truth.back().txMs + 1000;
   const int64_t rebootT = t0 + cfg.rebootAt, resumeT = rebootT + cfg.rebootFor;
 
-  // Cue switches in conductor time, for the look and palette check: the beat a Score announces a
-  // different look or palette for, as a time on the track clock, minus the lead every node draws ahead.
+  // Minus the lead, because every node draws that far ahead.
   std::vector<int64_t> switches;
   for (const Score& s : truth) {
     if (s.next.atBeat <= s.cur.atBeat || (s.next.look == s.cur.look && s.next.palette == s.cur.palette)) continue;
@@ -294,7 +289,6 @@ Result simulate(const Config& cfg, const std::vector<Score>& truth, bool verbose
   };
 
   for (int64_t T = t0; T <= tEnd; T++) {
-    // 1. Packets that arrive now.
     while (!wire.empty() && wire.top().due <= T) {
       InFlight p = wire.top();
       wire.pop();
@@ -330,7 +324,6 @@ Result simulate(const Config& cfg, const std::vector<Score>& truth, bool verbose
       }
     }
 
-    // 2. The conductor: reboot, beacon, Score.
     if (!down && T == rebootT) {
       down = true;
       for (int64_t& j : lastJoin) j = INT64_MIN / 2;
@@ -365,7 +358,6 @@ Result simulate(const Config& cfg, const std::vector<Score>& truth, bool verbose
       }
     }
 
-    // 3. Followers that know the conductor join every kJoinMs.
     for (int i = 1; i <= kFollowers; i++) {
       if (T < f[i].bootT || !f[i].knows || T < f[i].nextJoin) continue;
       f[i].nextJoin = T + kJoinMs;
@@ -374,7 +366,6 @@ Result simulate(const Config& cfg, const std::vector<Score>& truth, bool verbose
       deliver(T, i, 0, buf, n, false);
     }
 
-    // 4. Compare what everyone would draw at this instant.
     if (down) { disagreeStart = -1; continue; }
     Sample node[kFollowers + 1];
     const int64_t conductorNow = (int64_t)wrap(T + shift);

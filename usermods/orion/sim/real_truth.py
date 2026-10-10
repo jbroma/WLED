@@ -38,10 +38,7 @@ START_WINDOW = (0.5, 6.0)      # s before / after the first capture frame in whi
 NOMINAL_BPM = {"EDM_Detection_Mode": 128, "Kick_Shock": 138, "Enter_the_Party": 120}
 
 
-# ------------------------------------------------------------------ inputs
-
 def load_capture(path):
-    """Rows `ms id volume r0..r15`, nonzero and new frame ids only (what trace_frames.py keeps)."""
     seen, rows = set(), []
     for line in open(path):
         v = line.split()
@@ -53,7 +50,7 @@ def load_capture(path):
 
 
 def write_frames(trace, path):
-    """Same lines trace_frames.py writes, copying the trace's own number text so no digits change."""
+    """Copies the trace's own number text so no digits change."""
     seen = set()
     with open(trace) as src, open(path, "w") as out:
         for line in src:
@@ -99,8 +96,6 @@ def ref_times(n):
     return (np.arange(n) * HOP + WIN) / SR
 
 
-# --------------------------------------------------------------- alignment
-
 def envelope(bands, lag, valid=None):
     """Onset envelope per row: per-band half-wave log flux over `lag` rows, each band divided by its own
     mean (the mic and the file have very different tilt), summed, local mean removed."""
@@ -131,7 +126,6 @@ def energy_series(bands, t):
 
 
 def energy_ncc(cap_t, cap_bands, ref_t, ref_bands):
-    """Normalised correlation of the two level series for every shift of the reference."""
     tc, a = energy_series(cap_bands, cap_t)
     tr, b = energy_series(ref_bands, ref_t)
     a, b = a - a.mean(), b - b.mean()
@@ -158,7 +152,6 @@ def jump_time(t, bands, near, half=0.5):
 
 
 def audible_span(cap):
-    """First and last capture time with a real signal (> 10% of the median level of the non-silent frames)."""
     level = cap[:, 3:11].sum(axis=1)
     loud = level > 0.1 * np.median(level[level > 0])
     return cap[loud, 0][0] / 1000, cap[loud, 0][-1] / 1000
@@ -286,8 +279,6 @@ def to_capture(al):
     return lambda t: np.asarray(t) + al["tau0"] + al["slope"] * np.asarray(t)
 
 
-# ------------------------------------------------- capture kick check
-
 def synthetic_kicks(truth):
     beat = 60.0 / truth["bpm"]
     out = []
@@ -346,8 +337,6 @@ def kick_check(cap, B, truth, al):
         "floorMedianMs": ms(np.median(abs(sim - bias))), "floorP95Ms": ms(np.percentile(abs(sim - bias), 95)),
     }
 
-
-# ------------------------------------------------ real-track beat grid
 
 def lowpass(pcm, hz=150):
     return sosfiltfilt(butter(4, hz, "low", fs=SR, output="sos"), pcm)
@@ -518,8 +507,6 @@ def tempo_guess(pcm):
         tempo /= 2
     return tempo
 
-
-# -------------------------------------------------------------------- main
 
 def r5(x):
     return [round(float(v), 5) for v in x]

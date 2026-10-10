@@ -1,5 +1,4 @@
-// Orion party engine: the types every part shares. No Arduino or WLED headers,
-// so the same code builds natively for the simulator.
+// No Arduino or WLED headers, so the same code builds natively for the simulator.
 //
 // Data flow:
 //   conductor (LVR1):  Frame --Conductor::step--> Score --wire--> followers
@@ -20,7 +19,7 @@ constexpr int kBarsPerPhrase = 8;
 
 // One AudioReactive FFT cycle on the conductor (~23 ms apart).
 struct Frame {
-  Ms at;                                               // millis() when the cycle was noticed
+  Ms at;                                               // millis() when the FFT cycle finished
   uint32_t id;                                         // AR fftFrames; consecutive unless a cycle was missed
   float raw[kBands];                                   // linear channel magnitudes before AR gain/smoothing
   float volume;                                        // AR volumeSmth, 0..255
@@ -64,8 +63,8 @@ struct Onset {
 };
 constexpr int kOnsets = 8;
 
-// Everything the room needs to know about the music. The conductor sends a full Score on every
-// analysis frame, so any received Score replaces the previous one.
+// The conductor sends a full Score on every analysis frame, so any received Score replaces the
+// previous one.
 struct Score {
   uint8_t epoch = 0;                                   // random per conductor boot
   uint16_t seq = 0;

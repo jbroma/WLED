@@ -77,7 +77,6 @@ def add(buf, sample, at):
 
 
 STYLES = {
-    # name: bpm, kick pattern (16 steps per bar), snare steps, hat steps, kick level
     "house124": (124, [0, 4, 8, 12], [4, 12], [2, 6, 10, 14], 1.0),
     "edm128": (128, [0, 4, 8, 12], [4, 12], [2, 6, 10, 14], 1.0),
     "dubstep140": (140, [0, 10], [8], [0, 2, 4, 6, 8, 10, 12, 14], 1.0),

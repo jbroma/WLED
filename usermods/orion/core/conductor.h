@@ -1,5 +1,3 @@
-// The conductor runs on the controller that owns the microphone (WLED-LVR1). It turns
-// AudioReactive frames into the Score every controller renders from.
 #pragma once
 #include "types.h"
 

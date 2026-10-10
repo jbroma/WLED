@@ -40,7 +40,6 @@ class Grid:
         self.t = np.array([r["t"] for r in rows])
 
     def at(self, t):
-        """The latest Score sent at or before t."""
         i = np.searchsorted(self.t, t, side="right") - 1
         return self.rows[max(i, 0)]
 
@@ -130,7 +129,6 @@ def evaluate(rows, truth):
     m["tempoErrP95Pct"] = float(np.percentile(tempo_err, 95))
     m["lockedPct"] = 100 * len(locked) / max(1, sum(inside(r["t"], spans) for r in rows))
 
-    # Time to lock: from the first steady beat until tempo is within 1.5% and stays there for 4 s.
     start = spans[0][0]
     ok = np.array([r["conf"] >= LOCKED and abs(60 / r["period"] / bpm_t / level - 1) < 0.015 for r in rows])
     ts = g.t
@@ -165,7 +163,6 @@ def evaluate(rows, truth):
         m["phaseBiasMs"] = float(np.median(errs))
         m["beatsScored"] = len(errs)
 
-    # Downbeats: is the truth downbeat a bar start on the conductor's grid?
     def downbeat_acc(ds):
         hits = []
         for d in ds:
@@ -182,7 +179,6 @@ def evaluate(rows, truth):
     else:
         m["downbeatPct"] = downbeat_acc(downbeats)
 
-    # Sections.
     timeline = []
     for r in rows:
         if not timeline or timeline[-1][1] != r["section"]:
@@ -215,7 +211,6 @@ def evaluate(rows, truth):
         build_rows = [r for r in rows if sec["build"] <= r["t"] < drop_t]
         m["tensionAtDrop"] = build_rows[-1]["tension"] if build_rows else None
 
-    # Onsets against truth hits (synthetic only): precision, recall, timing bias.
     if truth.get("pattern"):
         hits = synth_hits(truth)
         seen = {}
@@ -280,7 +275,6 @@ def evaluate(rows, truth):
             m[f"{v}GroovePR"] = f"{tp}/{fp}/{fn}"
         m["grooveMisses"] = " ".join(misses)
 
-    # Envelopes while music plays, and in silence.
     music = [r for r in rows if inside(r["t"], spans)]
     env = np.array([r["env"] for r in music]) if music else np.zeros((1, 4))
     m["envP5"] = np.percentile(env, 5, axis=0).astype(int).tolist()
@@ -290,7 +284,6 @@ def evaluate(rows, truth):
     m["silentEnvMax"] = int(np.max([r["env"] for r in quiet])) if quiet else None
     m["silentConfMax"] = int(np.max([r["conf"] for r in quiet[-20:]])) if quiet else None
 
-    # Cues: every change dated ahead, promoted on time.
     changes, early = 0, 0
     prev = None
     for r in rows:

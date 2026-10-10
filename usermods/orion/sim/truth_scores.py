@@ -46,7 +46,6 @@ def main():
                 cur = s
         return cur
 
-    # Every hit in the track, for envelopes and the build's snare roll.
     hits = []
     for s in truth["sections"]:
         for b in range(s["bars"]):
@@ -77,7 +76,7 @@ def main():
             cur_look, cur_pal = look(phrase)
             nxt_look, nxt_pal = look(phrase + 1)
             cur_at, nxt_at = phrase * 32, (phrase + 1) * 32
-            if beat_now < nxt_at - 2:  # not announced yet
+            if beat_now < nxt_at - 2:
                 nxt_look, nxt_pal, nxt_at = cur_look, cur_pal, cur_at
             energy = ENERGY[s["name"]]
             tension = 0

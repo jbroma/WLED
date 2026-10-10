@@ -6,8 +6,6 @@
 #include "core/room.h"
 #include "core/wire.h"
 
-// Orion effects for the Orion homelab controllers (custom_usermods = audioreactive orion).
-//
 // Metadata string format: https://kno.wled.ge/interfaces/json-api/#effect-metadata
 
 static void mode_static(void) {
@@ -16,24 +14,13 @@ static void mode_static(void) {
 #define FX_FALLBACK_STATIC { mode_static(); return; }
 
 /*
- * Orion Aurora: slow, wide, soft-edged waves rendered in linear light.
- *
- * Why it exists. WLED applies colour gamma (2.8 here) to every pixel and then
- * scales the result by master brightness in the bus. A dim preset therefore
- * has a handful of output levels left, and a slow wave crawls across them one
+ * WLED applies colour gamma (2.8 here) to every pixel and then scales the
+ * result by master brightness in the bus. A dim preset therefore has a
+ * handful of output levels left, and a slow wave crawls across them one
  * visible step at a time. This effect keeps master brightness at 255 and does
- * the dimming itself:
+ * the dimming itself, in 16-bit linear light dithered in time to 8-bit output
+ * levels.
  *
- *   1. Palette colours are converted to linear light with the gamma table.
- *   2. Waves are summed per pixel in 16-bit linear light.
- *   3. The 16-bit value is dithered in time to an 8-bit *output* level
- *      (adjacent levels alternate with a per-pixel phase, so the eye sees the
- *      average).
- *   4. The output level is run through the inverse gamma table so that the
- *      gamma stage in strip.show() lands exactly on it.
- *
- * Sliders: Speed, Waves (count), Level (dim ceiling), Width (wave width).
- * Option 1: Dither on/off (A/B for the proof of concept).
  * Run it with master brightness 255; anything lower re-quantises after gamma.
  */
 
@@ -43,14 +30,14 @@ static void mode_static(void) {
 
 class OrionWave {
   private:
-    int32_t  center;        // 16.16 pixel position
-    int32_t  step;          // 16.16 pixels per frame, signed
-    uint32_t width;         // 16.16 half-width in pixels
-    uint16_t ttl;           // frames
-    uint16_t age;           // frames
-    uint16_t alpha;         // 0..OA_ONE-1 peak alpha
-    uint32_t env;           // cached age envelope 0..OA_ONE-1
-    uint16_t lin[3];        // linear-light colour, 16 bit per channel
+    int32_t  center;
+    int32_t  step;
+    uint32_t width;
+    uint16_t ttl;
+    uint16_t age;
+    uint16_t alpha;
+    uint32_t env;
+    uint16_t lin[3];
     bool     alive;
 
   public:
@@ -62,23 +49,18 @@ class OrionWave {
       ttl   = hw_random16(1500, 3600);            // 25 s to 60 s at 60 fps
       age   = 0;
       alpha = hw_random16(OA_ONE * 3 / 5, OA_ONE - 1);
-      // Half-width: 8% .. 45% of the run, scaled by the Width slider.
       uint32_t minW = (len * OA_ONE) / 12;
       uint32_t maxW = (len * OA_ONE * 45) / 100;
       width = minW + (uint64_t)(maxW - minW) * widthSlider / 255;
       if (width < OA_ONE * 2) width = OA_ONE * 2;
       bool left = hw_random8() & 1;
-      // Start just outside the run and drift across it.
       center = left ? (int32_t)(len * OA_ONE + width) : -(int32_t)width;
-      // Base speed 0.04 .. 0.12 px/frame before the Speed slider scales it.
       int32_t base = hw_random16(OA_ONE * 4 / 100, OA_ONE * 12 / 100);
       step = left ? -base : base;
       alive = true;
     }
 
     void update(uint32_t len, uint8_t speed) {
-      // Speed slider 0..255 -> 1/256 .. 1 of base speed. At 128 a wave moves
-      // 1.2 to 3.6 px/s, so 80 pixels take 22 to 66 seconds.
       int32_t s = (int32_t)(((int64_t)step * (1 + speed)) >> 8);
       if (s == 0) s = step > 0 ? 1 : -1;
       center += s;
@@ -93,18 +75,16 @@ class OrionWave {
       env = ((uint64_t)env * alpha) >> OA_SHIFT;
     }
 
-    // Adds this wave's linear-light contribution to acc[3] for pixel i.
     void accumulate(uint32_t i, uint32_t acc[3]) const {
       if (!alive) return;
       int32_t offset = (int32_t)(i << OA_SHIFT) - center;
       if (offset < 0) offset = -offset;
       if ((uint32_t)offset >= width) return;
-      // x in 0..1 (16.16); falloff (1 - x^2)^2: flat top, no hard edge.
       uint32_t x  = ((uint64_t)offset << OA_SHIFT) / width;
       uint32_t x2 = ((uint64_t)x * x) >> OA_SHIFT;
       uint32_t f  = OA_ONE - x2;
       f = ((uint64_t)f * f) >> OA_SHIFT;
-      f = ((uint64_t)f * env) >> OA_SHIFT;      // 0..OA_ONE-1
+      f = ((uint64_t)f * env) >> OA_SHIFT;
       for (int c = 0; c < 3; c++) acc[c] += ((uint64_t)lin[c] * f) >> OA_SHIFT;
     }
 
@@ -124,16 +104,11 @@ static void mode_orion_aurora(void) {
     waves[j].update(len, SEGMENT.speed);
   }
 
-  // Level slider: ceiling of the linear output, 0..255 -> output level 2..255.
   const uint32_t level = 2 + ((uint32_t)SEGMENT.custom1 * 253) / 255;
-  // Floor slider: output level every pixel never drops below (0..6). A pixel
-  // that switches between off and level 1 is the most visible step there is;
-  // a floor turns that edge into a 1-to-2 ramp instead.
+  // A pixel that switches between off and level 1 is the most visible step
+  // there is; a floor turns that edge into a 1-to-2 ramp instead.
   const uint32_t floorLevel = ((uint32_t)SEGMENT.custom3 * 6 + 15) / 31; // custom3 is a 5-bit slider
   const uint32_t span = level > floorLevel ? level - floorLevel : 0;
-  // The floor takes its hue from colour slot 2 (the background colour): the
-  // brightest channel of that colour sits at floorLevel, the others scale
-  // down with it. With no background colour the floor is a neutral grey.
   uint32_t floorC[3] = {floorLevel, floorLevel, floorLevel};
   {
     const uint32_t bg = SEGCOLOR(1);
@@ -154,7 +129,7 @@ static void mode_orion_aurora(void) {
     for (int c = 0; c < 3; c++) {
       uint32_t v = acc[c];
       if (v > 0xFFFF) v = 0xFFFF;
-      v = (v * span) / 255;                    // 16-bit linear above the floor
+      v = (v * span) / 255;
       uint32_t o = v >> 8;
       if (dither && (v & 0xFF) > threshold) o++;
       else if (!dither) o = (v + 128) >> 8;
@@ -170,7 +145,6 @@ static const char _data_FX_MODE_ORION_AURORA[] PROGMEM = "Orion Aurora@!,Waves,L
 // The patched AudioReactive keeps its last few raw frames in a ring (um_data slots 8-11): bands,
 // a cycle count and the millis() each cycle finished. Reading from the ring, a loop that stalled
 // still gets every frame, stamped with when the FFT made it rather than when the loop got to it.
-// Calls fn(frame) for every frame after `last`, oldest first; returns false without the patch.
 template <class Fn>
 static bool eachNewFrame(uint32_t& last, Fn fn) {
   um_data_t* um = nullptr;
@@ -198,7 +172,7 @@ static bool eachNewFrame(uint32_t& last, Fn fn) {
  * Trace: the AudioReactive frames this controller saw, for offline analysis.
  * GET /orion/trace?since=N returns up to 80 frames newer than sequence N still
  * in the ring, one per line:
- *   seq ms fftFrame volumeSmth b0..b15 r0..r15
+ *   seq ms fftFrame volumeSmth b0..b15 r0..r15 section kickAct lowRel allRel
  * b is fftResult (0..255) and r the raw linear channel magnitude from the
  * patched AudioReactive (um_data slot 8). The ring keeps r as log2(1 + r) in
  * 1/2048 steps: 0.03% precision over the whole range.
@@ -210,7 +184,7 @@ static bool eachNewFrame(uint32_t& last, Fn fn) {
  */
 struct TraceFrame { uint32_t ms, fftFrame; float vol; uint8_t bands[16]; uint16_t raw[16]; uint8_t section; float kickAct, lowRel, allRel; };
 // What the conductor concluded on each recent frame, so a trace can be compared with the simulator
-// frame by frame (/orion/trace appends: section kickAct lowRel allRel).
+// frame by frame.
 struct StepNote { uint32_t frame; uint8_t section; float kickAct, lowRel, allRel; };
 static StepNote stepNotes[128];
 static constexpr unsigned TRACE_LEN = 512;
@@ -269,14 +243,6 @@ static void serveTrace(AsyncWebServerRequest* request) {
 }
 
 /*
- * Orion Party: the music-reactive look of the living room.
- *
- * The controller whose AudioReactive sync mode is send is the conductor. It turns each FFT frame into
- * a Score (core/conductor.h) and unicasts it to every follower that joined (core/wire.h). Every
- * controller, the conductor included, derives one Moment per rendered frame from the newest Score and
- * its clock (core/player.h) and colours its own LEDs from /orion-room.json (core/looks.h).
- *
- * Sliders: Speed sx, Intensity ix, Look c1 (0 = autopilot, k = look k-1), Palette c2 (same), Floor c3.
  * Presets must use of=0, mi=false, rev=false, grp=1 so segment pixel i is strip pixel start+i.
  *
  * GET /orion/state reports the link and timing. {"orion":{"lead":N}} on /json/state sets the
@@ -288,7 +254,7 @@ using orion::elapsed;
 using orion::Ms;
 
 struct Stat {
-  uint32_t last = 0, max = 0;                          // max since /orion/state was last read
+  uint32_t last = 0, max = 0;
   float avg = 0;
   void add(uint32_t v) {
     last = v;
@@ -297,17 +263,17 @@ struct Stat {
   }
 };
 
-// Everything the effect and the usermod share.
 struct Engine {
   orion::Room room;
   orion::Player player;
-  orion::Score last;                                   // newest Score, for /orion/state only
-  orion::Moment moment;                                // computed once per rendered frame
-  unsigned long momentFor = 0;                         // strip.now the Moment was computed for
+  orion::Score last;
+  orion::Moment moment;
+  unsigned long momentFor = 0;
   bool momentValid = false;
   int leadMs = 40;
-  uint32_t frameUs = 0;                                // render time of the frame in progress, all segments
+  uint32_t frameUs = 0;
   Stat renderUs, stepUs;
+  Ms renderedAt = 0;                                   // last frame Orion Party drew here
 } engine;
 
 uint8_t toByte(float v) { return (uint8_t)(v * 255.0f + 0.5f); }   // render() already clamps to 0..1
@@ -324,6 +290,7 @@ static void mode_orion_party(void) {
     engine.frameUs = 0;
     engine.moment = engine.player.moment(millis(), engine.leadMs);
     engine.momentFor = strip.now;
+    engine.renderedAt = millis();
     engine.momentValid = true;
   }
   if (engine.room.size() == 0) {
@@ -353,7 +320,7 @@ class OrionUsermod : public Usermod {
   bool conductorRole = false;                          // AudioReactive sync mode is send
   orion::Conductor* conductor = nullptr;
   uint32_t lastFrameId = 0;
-  orion::Frame lastFrame = {};                         // newest conductor input, for /orion/state only
+  orion::Frame lastFrame = {};
 
   WiFiUDP udp;
   bool udpOpen = false;
@@ -369,7 +336,7 @@ class OrionUsermod : public Usermod {
   uint32_t bad = 0, gapHist[9] = {}, gapMax = 0;
 
   Ms lastLoop = 0, lastPoll = 0;
-  uint32_t loopMax = 0;                                // longest time between loop() calls since /orion/state was read
+  uint32_t loopMax = 0;
 
   void openSocket() {
     udp.stop();
@@ -485,7 +452,9 @@ class OrionUsermod : public Usermod {
         udp.write(buf, n);
         udp.endPacket();
       }
-    } else if (haveConductor && elapsed(now, nextJoin) >= 0) {
+    } else if (haveConductor && elapsed(now, engine.renderedAt) < 3000 && elapsed(now, nextJoin) >= 0) {
+      // Join only while Orion Party draws here: the conductor then stops streaming to this
+      // controller once its subscription expires, instead of sending 43 Scores a second all day.
       nextJoin = now + orion::kJoinMs;
       const size_t n = orion::encodeJoin(buf, sizeof buf);
       if (udp.beginPacket(conductorIp, orion::kPort)) {
