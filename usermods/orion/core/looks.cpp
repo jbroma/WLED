@@ -40,6 +40,14 @@ float decay(float t) {
   t = 1 - clamp01(t);
   return t * t;
 }
+// sin(x) to within 0.1%. newlib's sinf takes ~15 us on the ESP32 for the large arguments a drift
+// reaches, which made Lava cost 12 ms a frame; this wraps to one turn and evaluates a parabola.
+float wave(float x) {
+  float z = x * 0.15915494f;                           // turns
+  z = 2 * (z - floorf(z + 0.5f));                      // -1..1, one turn
+  const float y = 4 * z * (1 - fabsf(z));
+  return 0.225f * (y * fabsf(y) - y) + y;
+}
 // Signed distance between two angles in turns, -0.5..0.5.
 float turns(float d) { return d - floorf(d + 0.5f); }
 float unitHash(uint32_t a, uint32_t b) {
@@ -165,8 +173,8 @@ float beam(float a, float pos, float dir, float width) {
 Rgbf idle(const Moment& m, const Led& led, const Params& p, const Palette& pal) {
   if (led.role != Role::Cove && led.role != Role::Band) return kBlack;
   const float t = drift(m, p);
-  const float hue = 0.5f + 0.5f * sinf(6.2832f * (led.a + t / 90));
-  const float level = 0.16f + 0.05f * sinf(6.2832f * (led.u * 0.5f - t / 23)) + 0.1f * m.level;
+  const float hue = 0.5f + 0.5f * wave(6.2832f * (led.a + t / 90));
+  const float level = 0.16f + 0.05f * wave(6.2832f * (led.u * 0.5f - t / 23)) + 0.1f * m.level;
   return mix(pal.a, pal.b, hue) * level;
 }
 
@@ -174,10 +182,10 @@ Rgbf idle(const Moment& m, const Led& led, const Params& p, const Palette& pal) 
 Rgbf lava(const Moment& m, const Led& led, const Params& p, const Palette& pal) {
   const float t = drift(m, p);
   const float r = led.r - 0.9f * m.low;
-  const float warp = sinf(0.7f * led.y + 0.11f * t);
-  const float hue = 0.5f + 0.5f * sinf(0.55f * led.x + 1.4f * warp + 0.07f * t);
-  const float glow = 0.5f + 0.5f * sinf(1.1f * r - 0.23f * t + 0.8f * warp);
-  const float breathe = 1 + 0.08f * m.lock * cosf(6.2832f * m.inBar / kBeatsPerBar);
+  const float warp = wave(0.7f * led.y + 0.11f * t);
+  const float hue = 0.5f + 0.5f * wave(0.55f * led.x + 1.4f * warp + 0.07f * t);
+  const float glow = 0.5f + 0.5f * wave(1.1f * r - 0.23f * t + 0.8f * warp);
+  const float breathe = 1 + 0.08f * m.lock * wave(6.2832f * m.inBar / kBeatsPerBar + 1.5708f);
   const float level = (0.18f + 0.5f * smooth(0.15f, 1, glow)) * (0.75f + 0.35f * m.level) * breathe;
   return mix(pal.a, pal.b, smooth(0.1f, 0.9f, hue)) * level;
 }
