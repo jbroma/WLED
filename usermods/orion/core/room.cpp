@@ -81,6 +81,19 @@ bool Room::parse(const char* json, size_t len) {
     led.a = a < 0 ? a + 1 : a;
     led.role = fixtureRole;
   }
+
+  // On a loop, "seam" is the calibrated LED effects start from. Averaging each LED's distance with its
+  // mirror across the seam makes rings start there and run both ways around the loop together.
+  const char* seamAt = field(json, end, "seam");
+  if (seamAt) {
+    const int count = n / 2, seam = atoi(seamAt);
+    std::vector<float> r(count);
+    for (int i = 0; i < count; i++) r[i] = (leds[i].r + leds[((2 * seam - i) % count + count) % count].r) / 2;
+    for (int i = 0; i < count; i++) {
+      leds[i].r = r[i];
+      leds[i].rn = r[i] / fmaxf(far, 0.01f);
+    }
+  }
   return true;
 }
 

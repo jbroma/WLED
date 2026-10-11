@@ -20,7 +20,7 @@ constexpr float kFlashGap = 0.34f;
 // full over less than this many metres of strip, five or six blocks: a step of at most 0.2 between
 // neighbours. Every front, head and spot below is at least this soft.
 constexpr float kRamp = 0.38f;
-constexpr float kRoomW = 6.95f, kRoomH = 5.12f, kRoomFar = 7.44f;
+constexpr float kRoomW = 6.95f, kRoomH = 5.12f, kRoomFar = 7.56f;
 constexpr Rgbf kBlack = {0, 0, 0};
 constexpr Rgbf kWhite = {1, 1, 1};
 
